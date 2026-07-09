@@ -1,0 +1,6 @@
+idf_component_register(
+    SRCS "risk_logic.c"
+    INCLUDE_DIRS "include"
+    REQUIRES common esp_timer
+)
+
