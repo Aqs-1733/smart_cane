@@ -1,43 +1,137 @@
-# ESP32-C5 多设备协同触控智能盲杖系统完善版
+# ESP32-C5 Smart Cane Native ESP-IDF Project
 
-本仓库实现一个可落地演示的智能盲杖原型：
+The ESP32-C5 firmware in this repository has been fully migrated to a native ESP-IDF project.
+
+It no longer uses:
+
+- Arduino IDE project structure
+- `.ino` entry files
+- `Arduino.h`
+- `setup()` / `loop()`
+- Arduino APIs
+- Arduino as an ESP-IDF component
+
+The `backend/` directory is still kept as the FastAPI + SQLite + cloud AI service for risk upload, nearby risk lookup, AI advice, and voice endpoints.
+
+## Project Info
+
+- Target chip: `esp32c5`
+- Recommended ESP-IDF version: `v6.0.2`
+- Firmware entry point: `app_main(void)` in `main/main.c`
+- Runtime model: FreeRTOS tasks
+- Build system: ESP-IDF CMake
+- Partition table: `partitions.csv`, factory app partition is `1536K`
+
+## Structure
 
 ```text
-ESP32-C5 Arduino 固件 -> FastAPI 后端 -> SQLite 风险地图 -> 云端 LLM / 语音识别
+.
+├── CMakeLists.txt
+├── sdkconfig.defaults
+├── partitions.csv
+├── main/
+│   ├── CMakeLists.txt
+│   ├── main.c
+│   ├── board_config.h
+│   ├── app_tasks.c
+│   └── app_tasks.h
+├── components/
+│   ├── common/
+│   ├── i2c_bus/
+│   ├── tof_sensors/
+│   ├── touch_input/
+│   ├── vibration_motor/
+│   ├── buzzer/
+│   ├── buttons/
+│   ├── gps_location/
+│   ├── risk_logic/
+│   └── communication/
+└── backend/
 ```
 
-当前版本支持本地避障、地面落差检测、GPS 接入、触控握把、SOS、联网风险上传、多设备协同风险地图、云端大模型风险建议和云端语音识别接口。
+## Completed Firmware Features
 
+- TCA9548A I2C multiplexer channel selection
+- Four VL53L1X ToF sensor slots: front, left, right, down
+- Mock ToF mode for bench demos without hardware
+- MPR121 touch handle with tap, long press, and double click
+- GPIO fallback for touch input when MPR121 is not available
+- PCA9685 PWM vibration motor control for left, right, and center motors
+- Non-blocking active buzzer patterns
+- SOS button debounce and long-press trigger
+- UART GPS/GNSS NMEA parsing with mock fallback
+- Local obstacle avoidance and ground-drop detection
+- Nearby historical risk fusion
+- Native Wi-Fi STA connection
+- HTTP JSON upload for events and location
+- HTTP nearby risk lookup and AI advice request
+- ESP-NOW local device status broadcast and receive
+- FreeRTOS tasks: `sensor_task`, `logic_task`, `feedback_task`, `communication_task`, `debug_task`
 
-## 目录结构
+## Hardware Wiring
+
+| Module | ESP32-C5 connection |
+| --- | --- |
+| TCA9548A / MPR121 / PCA9685 SDA | GPIO 8 |
+| TCA9548A / MPR121 / PCA9685 SCL | GPIO 9 |
+| TCA9548A CH0 | Front VL53L1X |
+| TCA9548A CH1 | Left VL53L1X |
+| TCA9548A CH2 | Right VL53L1X |
+| TCA9548A CH3 | Down-facing VL53L1X |
+| PCA9685 CH0 | Left vibration motor MOS input |
+| PCA9685 CH1 | Right vibration motor MOS input |
+| PCA9685 CH2 | Center vibration motor MOS input |
+| SOS button | GPIO 4, active low by default |
+| Active buzzer | GPIO 5 |
+| GPS TX | ESP32-C5 GPIO 18 |
+| GPS RX | ESP32-C5 GPIO 19, optional |
+
+All GPIOs, I2C addresses, thresholds, Wi-Fi credentials, and backend URL are configured in:
 
 ```text
-firmware/smartcane_arduino/
-  smartcane_arduino.ino
-  config.h
-  i2c_bus.*
-  tof_sensors.*
-  touch_handle.*
-  vibration.*
-  buttons.*
-  buzzer.*
-  gps_location.*
-  risk_logic.*
-  network_client.*
-  data_model.h
-  README.md
-
-backend/
-  main.py
-  requirements.txt
-  .env.example
-  README.md
+components/common/include/smartcane_config.h
 ```
 
-## 后端快速运行
+## Build
+
+Open an ESP-IDF PowerShell or ESP-IDF Command Prompt, then run:
+
+```bash
+cd D:\smartcane
+idf.py set-target esp32c5
+idf.py fullclean
+idf.py build
+```
+
+The project has been verified to build successfully with ESP-IDF v6.0.2.
+
+## Flash And Monitor
+
+```bash
+idf.py -p COMx flash monitor
+```
+
+Replace `COMx` with your board serial port, for example:
+
+```bash
+idf.py -p COM5 flash monitor
+```
+
+Expected monitor logs include:
+
+```text
+[APP] ESP32-C5 blind assistance system starting...
+[I2C] I2C bus ready ...
+[SENSOR] front=xxcm left=xxcm right=xxcm down=xxcm
+[LOGIC] risk=medium/high ...
+[FEEDBACK] motor/buzzer status
+[COMM] Wi-Fi / ESP-NOW / HTTP status
+```
+
+## Backend
 
 ```powershell
-cd D:\smartcane\backend
+cd backend
 py -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
@@ -45,63 +139,23 @@ copy .env.example .env
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-在 `backend/.env` 里选择：
+Then update the backend URL in `components/common/include/smartcane_config.h`:
 
-```text
-LLM_PROVIDER=ark
+```c
+#define SMARTCANE_SERVER_BASE_URL "http://192.168.1.100:8000"
 ```
 
-或：
+Do not use `127.0.0.1` for the ESP32-C5, because that points to the device itself.
 
-```text
-LLM_PROVIDER=openai
-```
+## Hardware Items Still Requiring Real-World Verification
 
-然后填写对应平台的真实 Key。不要把真实 Key 写入 Git。
+- VL53L1X native ranging register behavior across module batches
+- MPR121 threshold tuning for the final handle material
+- GPS module baud rate and indoor fix behavior
+- PCA9685 + MOS drive strength for 1027 vibration motors
+- ESP-NOW range and channel behavior in the target environment
 
-检查：
+## Migration Report
 
-```bash
-curl http://127.0.0.1:8000/api/health
-curl http://127.0.0.1:8000/api/ai/status
-```
-
-## Arduino 烧录
-
-1. Arduino IDE 打开 `firmware/smartcane_arduino/smartcane_arduino.ino`。
-2. 安装库：`Adafruit_MPR121`、`Adafruit_PWMServoDriver`、`VL53L1X`、`ArduinoJson`、`TinyGPSPlus`。
-3. 修改 `config.h` 中的 Wi-Fi、服务器地址、`DEVICE_ID`、GPS 引脚、阈值。
-4. 选择 ESP32-C5 开发板并上传。
-5. 打开 115200 串口监视器。
-
-## 推荐硬件
-
-- ESP32-C5 SensairShuttle 或兼容 ESP32 Arduino 板
-- TCA9548A
-- 4 个 VL53L1X
-- MPR121
-- PCA9685
-- 3 个震动马达 + MOS 管驱动
-- SOS 按键
-- 有源蜂鸣器
-- 串口 GPS/GNSS 模块
-- 可选手机端或 I2S 麦克风，用于音频上传到后端做云端 ASR
-
-## 演示流程
-
-1. 启动后端，确认 `/api/health` 正常。
-2. 固件启动后串口显示距离、GPS/mock 位置、历史风险。
-3. 前方障碍触发震动和蜂鸣器。
-4. 地面落差触发强警报并上传 `ground_drop`。
-5. 触摸 electrode 1 长按上传 `user_mark`。
-6. 触摸 electrode 0 获取云端 AI 风险建议。
-7. 双击 electrode 0 演示云端语音文本命令识别。
-8. 用 `/api/voice/transcribe` 上传音频，演示复杂语音识别。
-9. 修改 `DEVICE_ID` 为第二根盲杖，验证附近历史风险融合。
-10. 长按 SOS 按键 2 秒，上传 `sos`。
-
-详细接线、接口和演示命令见：
-
-- `firmware/smartcane_arduino/README.md`
-- `backend/README.md`
+See [MIGRATION_REPORT.md](MIGRATION_REPORT.md).
 
