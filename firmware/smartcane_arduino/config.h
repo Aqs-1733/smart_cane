@@ -10,7 +10,7 @@
 #define SMARTCANE_DEVICE_ID "cane_001"
 #define SMARTCANE_WIFI_SSID "YOUR_WIFI_SSID"
 #define SMARTCANE_WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
-#define SMARTCANE_SERVER_BASE_URL "http://192.168.1.100:8000"
+#define SMARTCANE_SERVER_BASE_URL "http://10.136.53.207:8000"
 
 // Location fallback. The Arduino build records walked route by periodically
 // uploading this simulated/mobile-replaceable location to the backend.
@@ -55,7 +55,10 @@
 
 // GPIO. Buzzer pin follows the supplied buzzer test screenshot.
 #define SMARTCANE_BUZZER_PIN 4
-#define SMARTCANE_BUZZER_ACTIVE_HIGH 1
+// Many 3.3V active buzzer modules are low-triggered: LOW = on, HIGH = idle.
+// If your bare active buzzer is driven by a MOS and HIGH should turn it on,
+// change this back to 1.
+#define SMARTCANE_BUZZER_ACTIVE_HIGH 0
 #define SMARTCANE_SOS_BUTTON_PIN 5
 #define SMARTCANE_SOS_ACTIVE_LOW 1
 

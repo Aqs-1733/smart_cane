@@ -294,6 +294,92 @@ Response:
 
 The ESP32-C5 does not run deep learning locally. It sends structured sensor data to the backend, and the backend returns enhanced scoring and advice.
 
+## Android Frontend Compatibility
+
+The Android app under `frontend/SmartCane` uses a compact compatibility API. These paths read and write the same backend SQLite tables as the `/api/...` endpoints.
+
+### GET `/status`
+
+Response:
+
+```json
+{
+  "online": true,
+  "message": "后端已连接，正在记录路线和风险点",
+  "deviceCount": 2
+}
+```
+
+### GET `/devices`
+
+Response:
+
+```json
+{
+  "devices": [
+    {
+      "deviceId": "cane_001",
+      "name": "SmartCane cane_001",
+      "online": true,
+      "battery": null,
+      "lastSeen": "2026-07-19T02:30:00+00:00"
+    }
+  ]
+}
+```
+
+### GET `/events/latest`
+
+Response:
+
+```json
+{
+  "events": [
+    {
+      "id": 1,
+      "deviceId": "cane_001",
+      "riskType": "ground_drop",
+      "riskLevel": "high",
+      "distance": 950,
+      "message": "下视距离约 95 厘米，可能有台阶、坑洼或落差，请停止前进。",
+      "latitude": 31.2304,
+      "longitude": 121.4737,
+      "timestamp": "2026-07-19T02:30:00+00:00"
+    }
+  ]
+}
+```
+
+### POST `/sos`
+
+Request:
+
+```json
+{
+  "deviceId": "cane_001",
+  "latitude": 31.2304,
+  "longitude": 121.4737,
+  "message": "Android SOS"
+}
+```
+
+### POST `/telemetry`
+
+Optional simulator-compatible upload:
+
+```json
+{
+  "deviceId": "cane_001",
+  "battery": 88,
+  "frontDistanceMm": 450,
+  "leftDistanceMm": 1200,
+  "rightDistanceMm": 1300,
+  "downDistanceMm": 450,
+  "latitude": 31.2304,
+  "longitude": 121.4737
+}
+```
+
 ## A-Side Upload Rules
 
 A should upload:

@@ -49,6 +49,20 @@ If no key is configured, normal event/location/map APIs still work. AI advice fa
 
 See `D:\smartcane\docs\api_contract.md` for the shared A/B/C contract.
 
+## Android Frontend Compatibility APIs
+
+The Android app in `D:\smartcane\frontend\SmartCane` uses these legacy-compatible paths:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/status` | app server status card |
+| GET | `/devices` | app device list |
+| GET | `/events/latest` | latest risk events using camelCase fields |
+| POST | `/sos` | Android app SOS upload |
+| POST | `/telemetry` | optional simulator/device telemetry upload |
+
+These endpoints read and write the same SQLite tables as `/api/risk-events` and `/api/locations`.
+
 ## Risk Upload Example
 
 ```json

@@ -39,6 +39,9 @@ backend/
   requirements.txt
   README.md
 
+frontend/SmartCane/
+  Android Jetpack Compose frontend
+
 docs/
   api_contract.md
 ```
@@ -142,6 +145,14 @@ Useful demo endpoints:
 - `POST /api/ai/deep-risk`
 - `POST /api/ai/advice`
 
+Android frontend compatibility endpoints:
+
+- `GET /status`
+- `GET /devices`
+- `GET /events/latest`
+- `POST /sos`
+- `POST /telemetry`
+
 Cloud LLM and speech services are optional. Put keys only in `backend/.env`; never commit real secrets.
 
 ## Closed-Loop Demo
@@ -158,3 +169,29 @@ Cloud LLM and speech services are optional. Put keys only in `backend/.env`; nev
 10. Hold the SOS button for 2 seconds or run `sos`. The cane vibrates, beeps, prints SOS, and uploads `sos`.
 
 Serial commands are listed in `firmware/smartcane_arduino/README.md`.
+
+## Android Frontend
+
+Open this folder in Android Studio:
+
+```text
+D:\smartcane\frontend\SmartCane
+```
+
+The app backend address is configured in:
+
+```text
+frontend\SmartCane\app\src\main\java\com\nankai\smartcane\data\network\SmartCaneApiClient.kt
+```
+
+For a real phone on the same Wi-Fi, use the computer IPv4, for example:
+
+```kotlin
+const val BASE_URL = "http://10.136.53.207:8000"
+```
+
+For the Android Emulator, use:
+
+```kotlin
+const val BASE_URL = "http://10.0.2.2:8000"
+```

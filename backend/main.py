@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "smartcane.db"
 LEVEL_RANK = {"low": 0, "medium": 1, "high": 2}
+DEVICE_OFFLINE_SECONDS = 60
 
 
 try:
@@ -99,6 +100,25 @@ class TextCommandRequest(BaseModel):
     text: str = Field(..., min_length=1)
     lat: Optional[float] = None
     lng: Optional[float] = None
+
+
+class LegacySosCreate(BaseModel):
+    deviceId: str = Field(..., min_length=1)
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    message: str = "\u7528\u6237\u901a\u8fc7 Android App \u53d1\u8d77\u7d27\u6025\u6c42\u52a9"
+
+
+class LegacyTelemetryCreate(BaseModel):
+    deviceId: str = Field(..., min_length=1)
+    battery: Optional[int] = Field(None, ge=0, le=100)
+    frontDistanceMm: Optional[int] = Field(None, ge=0)
+    leftDistanceMm: Optional[int] = Field(None, ge=0)
+    rightDistanceMm: Optional[int] = Field(None, ge=0)
+    downDistanceMm: Optional[int] = Field(None, ge=0)
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+    timestamp: Optional[str] = None
 
 
 app = FastAPI(title="Smart Cane Collaborative Risk Backend", version="2.0.0")
@@ -241,6 +261,173 @@ def nearby_summary(lat: float, lng: float, radius: float) -> dict[str, Any]:
         "max_level": max_level,
         "recent_events": nearby[:10],
     }
+
+
+def parse_time(value: str | None) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def event_distance_mm(item: dict[str, Any]) -> Optional[int]:
+    if item.get("distance_mm") is not None:
+        return int(item["distance_mm"])
+    risk_type = str(item.get("risk_type") or "")
+    if "front" in risk_type and item.get("front_cm") is not None:
+        return int(item["front_cm"]) * 10
+    if "left" in risk_type and item.get("left_cm") is not None:
+        return int(item["left_cm"]) * 10
+    if "right" in risk_type and item.get("right_cm") is not None:
+        return int(item["right_cm"]) * 10
+    if ("ground" in risk_type or "drop" in risk_type) and item.get("down_cm") is not None:
+        return int(item["down_cm"]) * 10
+    return None
+
+
+def extra_message(item: dict[str, Any]) -> Optional[str]:
+    raw = item.get("extra_json")
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        message = raw.get("message")
+        return str(message) if message else None
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw if raw.startswith("message=") else None
+        if isinstance(parsed, dict) and parsed.get("message"):
+            return str(parsed["message"])
+    return None
+
+
+def legacy_event_message(item: dict[str, Any]) -> str:
+    custom_message = extra_message(item)
+    if custom_message:
+        return custom_message.removeprefix("message=")
+
+    risk_type = str(item.get("risk_type") or "none")
+    distance = event_distance_mm(item)
+    cm_text = f"{int(round(distance / 10))} \u5398\u7c73" if distance is not None else "\u672a\u77e5\u8ddd\u79bb"
+    if risk_type == "sos":
+        return "\u6536\u5230 Android App \u7d27\u6025\u6c42\u52a9\uff0c\u8bf7\u5c3d\u5feb\u8054\u7cfb\u4f7f\u7528\u8005\u3002"
+    if risk_type == "ground_drop":
+        return f"\u4e0b\u89c6\u8ddd\u79bb\u7ea6 {cm_text}\uff0c\u53ef\u80fd\u6709\u53f0\u9636\u3001\u5751\u6d3c\u6216\u843d\u5dee\uff0c\u8bf7\u505c\u6b62\u524d\u8fdb\u3002"
+    if risk_type == "front_obstacle":
+        return f"\u524d\u65b9\u7ea6 {cm_text} \u6709\u969c\u788d\uff0c\u8bf7\u51cf\u901f\u5e76\u51c6\u5907\u7ed5\u884c\u3002"
+    if risk_type == "left_obstacle":
+        return f"\u5de6\u4fa7\u7ea6 {cm_text} \u6709\u969c\u788d\uff0c\u8bf7\u5411\u53f3\u4fa7\u4fdd\u6301\u8ddd\u79bb\u3002"
+    if risk_type == "right_obstacle":
+        return f"\u53f3\u4fa7\u7ea6 {cm_text} \u6709\u969c\u788d\uff0c\u8bf7\u5411\u5de6\u4fa7\u4fdd\u6301\u8ddd\u79bb\u3002"
+    if risk_type == "user_mark":
+        return "\u7528\u6237\u624b\u52a8\u6807\u8bb0\u4e86\u4e00\u4e2a\u98ce\u9669\u70b9\u3002"
+    if risk_type == "history_risk":
+        return "\u9644\u8fd1\u5b58\u5728\u5386\u53f2\u9ad8\u98ce\u9669\u70b9\uff0c\u8bf7\u51cf\u901f\u786e\u8ba4\u3002"
+    return "\u6682\u65e0\u660e\u786e\u98ce\u9669\uff0c\u8bf7\u4fdd\u6301\u8c28\u614e\u3002"
+
+
+def legacy_event_dict(row: sqlite3.Row) -> dict[str, Any]:
+    item = event_to_dict(row)
+    return {
+        "id": item["id"],
+        "deviceId": item["device_id"],
+        "riskType": item["risk_type"],
+        "riskLevel": item["risk_level"],
+        "distance": event_distance_mm(item),
+        "message": legacy_event_message(item),
+        "latitude": item.get("lat"),
+        "longitude": item.get("lng"),
+        "timestamp": item.get("timestamp"),
+    }
+
+
+def latest_location_for_device(device_id: str) -> Optional[dict[str, Any]]:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM device_locations WHERE device_id = ? ORDER BY id DESC LIMIT 1",
+            (device_id,),
+        ).fetchone()
+    return row_to_dict(row) if row else None
+
+
+def resolve_legacy_location(device_id: str, lat: Optional[float], lng: Optional[float]) -> tuple[float, float]:
+    if lat is not None and lng is not None:
+        return float(lat), float(lng)
+    latest = latest_location_for_device(device_id)
+    if latest:
+        return float(latest["lat"]), float(latest["lng"])
+    return 0.0, 0.0
+
+
+def legacy_device_list() -> list[dict[str, Any]]:
+    devices: dict[str, dict[str, Any]] = {}
+    with db() as conn:
+        location_rows = conn.execute("SELECT * FROM device_locations ORDER BY id DESC").fetchall()
+        event_rows = conn.execute("SELECT * FROM risk_events ORDER BY id DESC").fetchall()
+
+    for row in location_rows:
+        item = row_to_dict(row)
+        device_id = item["device_id"]
+        if device_id in devices:
+            continue
+        devices[device_id] = {
+            "deviceId": device_id,
+            "name": f"SmartCane {device_id}",
+            "online": False,
+            "battery": None,
+            "lastSeen": item["timestamp"],
+        }
+
+    for row in event_rows:
+        item = event_to_dict(row)
+        device_id = item["device_id"]
+        device = devices.setdefault(
+            device_id,
+            {
+                "deviceId": device_id,
+                "name": f"SmartCane {device_id}",
+                "online": False,
+                "battery": None,
+                "lastSeen": item["timestamp"],
+            },
+        )
+        if item.get("timestamp") and parse_time(item["timestamp"]) and (
+            not parse_time(device.get("lastSeen")) or parse_time(item["timestamp"]) > parse_time(device.get("lastSeen"))
+        ):
+            device["lastSeen"] = item["timestamp"]
+        battery = item.get("battery")
+        if battery is not None and float(battery) >= 0:
+            device["battery"] = int(float(battery))
+
+    now = datetime.now(timezone.utc)
+    for device in devices.values():
+        last_seen = parse_time(device.get("lastSeen"))
+        device["online"] = bool(last_seen and (now - last_seen).total_seconds() <= DEVICE_OFFLINE_SECONDS)
+
+    return sorted(devices.values(), key=lambda item: item.get("lastSeen") or "", reverse=True)
+
+
+def store_legacy_location(device_id: str, lat: Optional[float], lng: Optional[float], battery: Optional[int] = None) -> None:
+    if lat is None or lng is None:
+        return
+    create_location(
+        LocationCreate(
+            device_id=device_id,
+            lat=float(lat),
+            lng=float(lng),
+            source="app",
+            provider="phone",
+            quality="usable",
+            accuracy_m=None,
+            timestamp=now_iso(),
+        )
+    )
 
 
 def chat_config() -> dict[str, str]:
@@ -550,6 +737,133 @@ def create_location(location: LocationCreate) -> dict[str, Any]:
         )
         row = conn.execute("SELECT * FROM device_locations WHERE id = ?", (cur.lastrowid,)).fetchone()
     return row_to_dict(row)
+
+
+@app.get("/status")
+def legacy_status() -> dict[str, Any]:
+    devices = legacy_device_list()
+    return {
+        "online": True,
+        "message": "\u540e\u7aef\u5df2\u8fde\u63a5\uff0c\u6b63\u5728\u8bb0\u5f55\u8def\u7ebf\u548c\u98ce\u9669\u70b9",
+        "deviceCount": len(devices),
+    }
+
+
+@app.get("/devices")
+def legacy_devices() -> dict[str, Any]:
+    return {"devices": legacy_device_list()}
+
+
+@app.get("/events/latest")
+def legacy_latest_events(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM risk_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return {"events": [legacy_event_dict(row) for row in rows]}
+
+
+@app.post("/sos", status_code=201)
+def legacy_sos(request: LegacySosCreate) -> dict[str, Any]:
+    lat, lng = resolve_legacy_location(request.deviceId, request.latitude, request.longitude)
+    store_legacy_location(request.deviceId, request.latitude, request.longitude)
+    stored = store_event(
+        EventCreate(
+            device_id=request.deviceId,
+            lat=lat,
+            lng=lng,
+            risk_type="sos",
+            risk_level="high",
+            level="high",
+            direction="stop",
+            sensor="android_app",
+            distance_mm=None,
+            battery=None,
+            front_cm=None,
+            left_cm=None,
+            right_cm=None,
+            down_cm=None,
+            extra_json={"message": request.message, "source": "android_app_sos"},
+            timestamp=now_iso(),
+        )
+    )
+    return {
+        "success": True,
+        "message": "\u7d27\u6025\u6c42\u52a9\u5df2\u8bb0\u5f55",
+        "sos": {
+            "id": stored["id"],
+            "deviceId": stored["device_id"],
+            "latitude": stored["lat"],
+            "longitude": stored["lng"],
+            "message": request.message,
+            "receivedAt": stored["timestamp"],
+        },
+    }
+
+
+@app.post("/telemetry", status_code=201)
+def legacy_telemetry(request: LegacyTelemetryCreate) -> dict[str, Any]:
+    store_legacy_location(request.deviceId, request.latitude, request.longitude, request.battery)
+    lat, lng = resolve_legacy_location(request.deviceId, request.latitude, request.longitude)
+
+    generated: list[dict[str, Any]] = []
+    candidates: list[tuple[str, str, str, Optional[int]]] = []
+    if request.frontDistanceMm is not None:
+        if request.frontDistanceMm < 500:
+            candidates.append(("front_obstacle", "high", "tof_front", request.frontDistanceMm))
+        elif request.frontDistanceMm <= 1200:
+            candidates.append(("front_obstacle", "medium", "tof_front", request.frontDistanceMm))
+    if request.leftDistanceMm is not None and request.leftDistanceMm < 500:
+        candidates.append(("left_obstacle", "high", "tof_left", request.leftDistanceMm))
+    if request.rightDistanceMm is not None and request.rightDistanceMm < 500:
+        candidates.append(("right_obstacle", "high", "tof_right", request.rightDistanceMm))
+    if request.downDistanceMm is not None and request.downDistanceMm > 750:
+        candidates.append(("ground_drop", "high", "tof_down", request.downDistanceMm))
+
+    for risk_type, level, sensor, distance_mm in candidates:
+        front_cm = int(request.frontDistanceMm / 10) if request.frontDistanceMm is not None else None
+        left_cm = int(request.leftDistanceMm / 10) if request.leftDistanceMm is not None else None
+        right_cm = int(request.rightDistanceMm / 10) if request.rightDistanceMm is not None else None
+        down_cm = int(request.downDistanceMm / 10) if request.downDistanceMm is not None else None
+        stored = store_event(
+            EventCreate(
+                device_id=request.deviceId,
+                lat=lat,
+                lng=lng,
+                risk_type=risk_type,
+                risk_level=level,
+                level=level,
+                direction="stop" if level == "high" else "slow",
+                sensor=sensor,
+                distance_mm=distance_mm,
+                battery=request.battery,
+                front_cm=front_cm,
+                left_cm=left_cm,
+                right_cm=right_cm,
+                down_cm=down_cm,
+                extra_json={"source": "legacy_telemetry"},
+                timestamp=request.timestamp or now_iso(),
+            )
+        )
+        generated.append(stored)
+
+    return {
+        "success": True,
+        "message": "\u9065\u6d4b\u5df2\u63a5\u6536",
+        "generatedEvents": len(generated),
+        "events": [
+            {
+                "id": event["id"],
+                "deviceId": event["device_id"],
+                "riskType": event["risk_type"],
+                "riskLevel": event["risk_level"],
+                "distance": event.get("distance_mm"),
+                "message": legacy_event_message(event),
+                "latitude": event.get("lat"),
+                "longitude": event.get("lng"),
+                "timestamp": event.get("timestamp"),
+            }
+            for event in generated
+        ],
+    }
 
 
 @app.get("/api/locations/latest")

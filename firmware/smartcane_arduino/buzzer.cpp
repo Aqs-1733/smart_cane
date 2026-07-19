@@ -20,6 +20,7 @@ static uint8_t idleLevel() {
 }
 
 void buzzerBegin() {
+  digitalWrite(SMARTCANE_BUZZER_PIN, idleLevel());
   pinMode(SMARTCANE_BUZZER_PIN, OUTPUT);
   digitalWrite(SMARTCANE_BUZZER_PIN, idleLevel());
   Serial.print(F("[BUZZER] GPIO "));
