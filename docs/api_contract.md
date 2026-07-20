@@ -41,6 +41,10 @@ Recommended values:
 - `history_risk`
 - `user_mark`
 - `sos`
+- `fall_detected`
+- `voice_request`
+- `prolonged_obstacle`
+- `approaching_obstacle`
 - `none`
 
 ## Directions
@@ -65,6 +69,8 @@ Recommended values:
 - `tof_down`
 - `touch`
 - `sos_button`
+- `bmi270_imu`
+- `tof_trend`
 - `gps`
 - `device`
 - `unknown`
@@ -134,7 +140,7 @@ Compatibility alias:
 
 ## GET `/api/risk-events`
 
-Returns recent risk events for demos and map display.
+Returns recent risk events for map display and integration checks.
 
 Query:
 
@@ -146,7 +152,7 @@ Compatibility alias:
 
 ## POST `/api/locations`
 
-ESP32-C5 uploads GNSS/BeiDou/GPS or mock location. This endpoint is also the simple trajectory source for the map demo.
+ESP32-C5 uploads GNSS/BeiDou/GPS or fallback location. This endpoint is also the simple trajectory source for the map.
 
 ```json
 {
@@ -193,7 +199,7 @@ Example:
 
 ## GET `/api/locations/history`
 
-Returns recent location records for one device, newest first. C can use it for a demo trajectory line.
+Returns recent location records for one device, newest first. The mobile client can use it for a trajectory line.
 
 Query:
 
@@ -237,12 +243,12 @@ Important values:
 - ToF: front `TCA CH2`, left `CH3`, right `CH4`, down `CH5`
 - Touch: MPR121/HW-017 on `TCA CH7`
 - Buzzer: `GPIO4`, low-level trigger
-- Button: `GPIO5`, active low, long-press SOS
+- Button: `GPIO5`, active low. Short press sends `voice_request` to blind Android app; long press sends `sos`.
 - Motors: blue PCA9685 PWM/Servo Shield at `0x40`, left `CH8`, right `CH9`, center `CH10`
 
 ## POST `/api/sensor-frames`
 
-Preferred full-chain frame upload from the ESP32-C5 or Android simulator. The backend computes a hardware-aware risk score, stores medium/high risks, and returns frontend voice/feedback fields.
+Preferred full-chain frame upload from the ESP32-C5 or Android integration tools. The backend computes a hardware-aware risk score, stores medium/high risks, stores button `voice_request`, and returns frontend voice/feedback fields.
 
 ```json
 {
@@ -257,6 +263,23 @@ Preferred full-chain frame upload from the ESP32-C5 or Android simulator. The ba
   "source": "esp32c5"
 }
 ```
+
+Physical-button short press payload:
+
+```json
+{
+  "device_id": "cane_001",
+  "front_cm": 180,
+  "left_cm": 150,
+  "right_cm": 150,
+  "down_cm": 45,
+  "button_event": "short_press",
+  "alert_type": "voice_request",
+  "source": "esp32c5"
+}
+```
+
+The response has `risk.risk_type="voice_request"` and `risk.feedback.action="start_voice_input"`. `/api/alerts/latest?role=blind&deviceId=cane_001` returns it; the companion role does not.
 
 Response:
 
@@ -308,7 +331,7 @@ The route score combines walking cost with stored collaborative risk points near
 
 ## POST `/api/ai/advice`
 
-Backend AI advice endpoint. ESP32-C5 can call it for serial demo text, but local obstacle avoidance must not depend on it. The response includes a lightweight deep-learning risk score from `tiny-mlp-risk-v1`.
+Backend AI advice endpoint. ESP32-C5 can call it for assisted text, but local obstacle avoidance must not depend on it. The response includes a lightweight deep-learning risk score from `tiny-mlp-risk-v1`.
 
 ```json
 {
@@ -329,7 +352,7 @@ Backend AI advice endpoint. ESP32-C5 can call it for serial demo text, but local
 
 ## POST `/api/ai/deep-risk`
 
-Runs backend-side deep-learning risk inference without calling the LLM. This is useful for demos, tests, and map-side risk coloring.
+Runs backend-side deep-learning risk inference without calling the LLM. This is useful for integration tests and map-side risk coloring.
 
 Request:
 

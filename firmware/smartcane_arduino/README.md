@@ -1,6 +1,6 @@
 # ESP32-C5 Smart Cane Arduino Firmware
 
-This is the Arduino IDE / Arduino framework firmware for the ESP32-C5 collaborative smart cane demo.
+This is the Arduino IDE / Arduino framework firmware for the ESP32-C5 collaborative smart cane.
 
 It is designed for the hardware already tested in the supplied Arduino IDE screenshots:
 
@@ -10,8 +10,8 @@ It is designed for the hardware already tested in the supplied Arduino IDE scree
 - Four VL53L1X sensors through TCA channels `CH2/CH3/CH4/CH5`
 - MPR121/HW-017 touch module on TCA `CH7` at `0x5A`
 - Active buzzer on `GPIO4`
-- Teacher-verified vibration motor wiring on GPIO `8/9/10` using HIGH/LOW output
-- Optional ESP-SensairShuttle BMI270 motion sensor for fall detection
+- ESP-SensairShuttle BMI270 motion sensor for fall detection
+- PCA9685 vibration feedback on blue board channels `CH8/CH9/CH10`
 
 All pins, I2C addresses, thresholds, Wi-Fi, backend URL, and device ID are in `config.h`.
 
@@ -36,14 +36,14 @@ Install these from Arduino IDE Library Manager:
 | VL53L1X left | TCA `CH3` |
 | VL53L1X right | TCA `CH4` |
 | VL53L1X down | TCA `CH5` |
-| Left vibration signal | GPIO `8`, teacher HIGH/LOW test logic |
-| Right vibration signal | GPIO `9`, teacher HIGH/LOW test logic |
-| Center vibration signal | GPIO `10`, teacher HIGH/LOW test logic |
+| Left vibration motor | PCA9685 `CH8`: signal to `PWM/SIG`, red to `V+`, black/brown to `GND` |
+| Right vibration motor | PCA9685 `CH9`: signal to `PWM/SIG`, red to `V+`, black/brown to `GND` |
+| Center vibration motor | PCA9685 `CH10`: signal to `PWM/SIG`, red to `V+`, black/brown to `GND` |
 | Buzzer | `GPIO4` |
-| SOS button | `GPIO5`, active low with internal pull-up |
-| BMI270 | Built-in SensairShuttle sensor; same I2C bus if present |
+| Physical button | `GPIO5`, active low with internal pull-up; short press requests Android voice input, long press triggers SOS |
+| BMI270 | SensairShuttle BMI270/BMM350 ShuttleBoard; current hardware appears at I2C `0x69`; firmware probes both `0x68/0x69` and uploads the Bosch BMI270 config before reading acceleration |
 
-Keep each three-pin motor plug orientation unchanged when moving it: black/brown to `GND`, red to `V+`, and white/orange/yellow to `PWM`.
+Keep each three-pin motor plug orientation unchanged: black/brown to `GND`, red to `V+`, and white/orange/yellow to signal/PWM. Do not put motor signals on ESP32 GPIO `8/9/10` while using the BMI270/BMM350 daughter board; PCA9685 `CH8/CH9/CH10` are safe because they are I2C PWM channels, not ESP32 pins.
 
 If your final wiring returns to the original `CH0/CH1/CH2/CH3` ToF plan, only change these macros in `config.h`:
 
@@ -60,14 +60,16 @@ Edit `config.h`:
 
 ```cpp
 #define SMARTCANE_DEVICE_ID "cane_001"
-#define SMARTCANE_WIFI_SSID "your_wifi"
-#define SMARTCANE_WIFI_PASSWORD "your_password"
+#define SMARTCANE_WIFI_SSID "xin"
+#define SMARTCANE_WIFI_PASSWORD "22222222"
 #define SMARTCANE_SERVER_BASE_URL "http://your_pc_lan_ip:8000"
 #define SMARTCANE_MOCK_LAT 31.230400
 #define SMARTCANE_MOCK_LNG 121.473700
 ```
 
-Use your PC LAN IP, not `127.0.0.1`, because `127.0.0.1` from the ESP32 means the ESP32 itself.
+Use your PC LAN IP, not `127.0.0.1`, because `127.0.0.1` from the ESP32 means the ESP32 itself. For a phone-hotspot test, connect both the PC and ESP32-C5 to the phone hotspot, run the backend with `--host 0.0.0.0`, and set `SMARTCANE_SERVER_BASE_URL` to the PC IPv4 shown by `ipconfig`.
+
+For an independent product build, keep the ESP32-C5 on a reachable Wi-Fi/hotspot and point `SMARTCANE_SERVER_BASE_URL` at a cloud or LAN backend. The Android phone supplies the real Amap/GPS location to the backend; the cane-side coordinates are only a fallback until a GNSS module or phone-to-cane location bridge is added.
 
 ## Open And Flash
 
@@ -83,19 +85,19 @@ Use your PC LAN IP, not `127.0.0.1`, because `127.0.0.1` from the ESP32 means th
 
 Local safety does not depend on Wi-Fi:
 
-- Samples four ToF distances every `3000 ms` for bench testing.
+- Samples four ToF distances every `500 ms`.
 - Detects front warning/danger by distance thresholds.
 - Detects ground drops from the down-facing sensor.
 - Fuses nearby history when available.
-- Drives left/right/center vibration motors.
+- Drives obstacle vibration through PCA9685 `CH8/CH9/CH10`.
 - Uses the buzzer only for high-risk cases, ground drops, and SOS.
-- Debounces the SOS button and triggers after `2 s`.
+- Debounces the physical button. Short press uploads `voice_request` for the blind Android app; long press after `2 s` uploads `sos`.
 - Reads MPR121 touch electrodes 0-5.
-- Reads BMI270 acceleration and raises `fall_detected` on impact/freefall plus lying posture. Fall alert uses buzzer and backend upload only, no vibration.
+- Reads BMI270 acceleration and raises `fall_detected` on large vertical motion/freefall/impact plus a still sideways posture. Fall alert uses buzzer and backend upload only, no vibration.
 
 ## Route And Risk Recording
 
-Because the current purchase list does not include a verified GNSS module, route recording uses mock/mobile-replaceable coordinates from `config.h` by default.
+Because the current purchase list does not include a verified GNSS module, route recording should use Android/Amap location from the backend. The firmware keeps fallback coordinates in `config.h` so hardware-only tests still upload valid JSON.
 
 When the location moves into a new small grid cell, the firmware:
 
@@ -104,7 +106,7 @@ When the location moves into a new small grid cell, the firmware:
 
 Local risk events are event-driven: the same risk type/level/direction in the same location grid is logged, vibrated, and uploaded only once. It is reported again after the risk changes, clears and reappears, or the user moves into another grid cell. User marks are uploaded to `POST /api/risk-events`. Another device ID can then call `GET /api/risks/nearby` and use the historical risk count in local risk fusion.
 
-`SMARTCANE_MOCK_ROUTE_ENABLED` is `0` by default for bench testing. Set it to `1` only when you want the device to simulate walking while it is not physically moving.
+`SMARTCANE_MOCK_ROUTE_ENABLED` is `0` by default for bench testing. Keep it off for product tests.
 
 Optional UART GNSS parsing is reserved behind `SMARTCANE_GNSS_ENABLED`, but it is disabled by default to match the currently verified hardware.
 
@@ -121,7 +123,7 @@ Optional UART GNSS parsing is reserved behind `SMARTCANE_GNSS_ENABLED`, but it i
 
 The firmware prints every touch event clearly to Serial.
 
-## Serial Demo Commands
+## Serial Product Commands
 
 Use these in Serial Monitor:
 
@@ -130,18 +132,15 @@ help
 status
 read
 scan
-mock auto
-mock clear
-mock warn
-mock danger
-mock drop
-mock blocked
-mock left
-mock right
+pca
+imurescan
+imustream on
+imustream off
 nearby
 deep
 mark
 sos
+btn
 mode
 path
 vib status
@@ -152,8 +151,6 @@ vib all
 vib stop
 imu
 imuraw
-fall
-fallclear
 t0
 t1long
 t2
@@ -162,9 +159,9 @@ t4
 t5
 ```
 
-These commands allow a full demo even without all touch or ToF hardware attached.
+Use `scan`, `pca`, `imu`, `read`, `vib all`, and `beep` for real hardware checks.
 
-## Demo Flow
+## Product Test Flow
 
 1. Start the backend.
 2. Flash `cane_001`.
@@ -172,9 +169,10 @@ These commands allow a full demo even without all touch or ToF hardware attached
 4. Put an obstacle in front: Serial prints one risk event, center motor vibrates, and high danger also beeps.
 5. Keep the obstacle still: the same place/same risk is not printed repeatedly.
 6. Open left/right side space or move to another grid cell: the left/right motor suggests the safer direction and a new event can be recorded.
-7. Lift the down-facing sensor or use `mock drop`: ground drop triggers strong vibration and buzzer once for that place.
+7. Lift the down-facing sensor: ground drop triggers strong vibration and buzzer once for that place.
 8. Run `mark` or long-press touch E1: backend records a user risk point.
 9. Run `path`: local walked route/risk ring buffer is printed.
 10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`: the second cane sees the historical risk area.
-11. Hold SOS for 2 seconds or run `sos`: buzzer, vibration, Serial SOS log, and backend upload.
-12. Run `imu` and `imuraw` to check BMI270. Run `fall` to simulate a fall: the buzzer alarms, no motor runs, and the backend exposes the alert to both blind and companion app roles.
+11. Short-press the physical button or run `btn`: firmware uploads `voice_request`; the blind Android app enters voice interaction mode.
+12. Hold the physical button for 2 seconds or run `sos`: buzzer, vibration, Serial SOS log, and backend upload as `sos`.
+13. Run `scan`: root should show `0x68` or `0x69` for BMI270. Then run `imurescan`, `imu`, and `imustream on`. Move the board and confirm raw acceleration changes. For a real fall test, move the board quickly downward over a soft cushion, stop it, and lay it sideways for about 2 seconds. The buzzer alarms, no motor runs, and the backend exposes the alert to both blind and companion app roles.

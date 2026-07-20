@@ -36,12 +36,26 @@ bool selectTcaChannel(uint8_t channel) {
   return true;
 }
 
+bool disableTcaChannels() {
+  Wire.beginTransmission(SMARTCANE_TCA9548A_ADDR);
+  Wire.write(0x00);
+  uint8_t err = Wire.endTransmission();
+  if (err != 0) {
+    Serial.print(F("[I2C] TCA disable failed err="));
+    Serial.println(err);
+    return false;
+  }
+  delayMicroseconds(500);
+  return true;
+}
+
 bool i2cProbe(uint8_t address) {
   Wire.beginTransmission(address);
   return Wire.endTransmission() == 0;
 }
 
 void i2cScanRoot() {
+  disableTcaChannels();
   i2cScanCurrentBus("root");
 }
 

@@ -81,9 +81,11 @@ bool tofBegin() {
     allReady = allReady && sensorReady[i];
   }
 
-  mockActive = !allReady;
+  mockActive = !allReady && SMARTCANE_ALLOW_MOCK_FALLBACK;
   if (mockActive) {
     Serial.println(F("[TOF] incomplete hardware, fallback to mock distances"));
+  } else if (!allReady) {
+    Serial.println(F("[TOF] incomplete hardware, real-valid-only mode"));
   }
   return allReady;
 #endif

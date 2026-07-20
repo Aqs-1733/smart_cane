@@ -4,6 +4,7 @@
 
     <!-- Allow the app to call the FastAPI backend. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <!-- Network and Wi-Fi state are used for user-facing diagnostics. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />

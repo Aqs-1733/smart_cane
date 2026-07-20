@@ -64,10 +64,12 @@ HARDWARE_PROFILE: dict[str, Any] = {
         "buzzer": {"gpio": 4, "active_level": "LOW", "idle_level": "HIGH"},
         "sos_button": {"gpio": 5, "active_level": "LOW", "hold_ms": 2000},
         "vibration_motors": {
-            "mode": "teacher_gpio_onoff",
-            "left": {"gpio": 8},
-            "right": {"gpio": 9},
-            "center": {"gpio": 10},
+            "mode": "pca9685_pwm",
+            "address": "0x40",
+            "note": "Use PCA9685 channels, not ESP32 GPIO8/9/10. GPIO8/9/10 are reserved by the BMI270/BMM350 shuttle board.",
+            "left": {"pca_channel": 8},
+            "right": {"pca_channel": 9},
+            "center": {"pca_channel": 10},
         },
     },
     "built_in_sensors": {
@@ -260,6 +262,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_no_cache_headers(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/") or request.url.path == "/status":
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 def env(name: str, default: str = "") -> str:
@@ -507,6 +519,8 @@ def legacy_event_message(item: dict[str, Any]) -> str:
         return "\u6536\u5230 Android App \u7d27\u6025\u6c42\u52a9\uff0c\u8bf7\u5c3d\u5feb\u8054\u7cfb\u4f7f\u7528\u8005\u3002"
     if risk_type == "fall_detected":
         return "\u68c0\u6d4b\u5230\u7591\u4f3c\u8dcc\u5012\uff0c\u5df2\u5411\u76f2\u4eba\u7aef\u548c\u966a\u62a4\u7aef\u53d1\u9001\u7d27\u6025\u544a\u8b66\u3002"
+    if risk_type == "voice_request":
+        return "\u76f2\u6756\u6309\u94ae\u5df2\u89e6\u53d1\u8bed\u97f3\u4ea4\u4e92\uff0c\u8bf7\u5728\u76f2\u4eba\u7aef\u8bf4\u51fa\u76ee\u7684\u5730\u6216\u6307\u4ee4\u3002"
     if risk_type == "prolonged_obstacle":
         return "\u540c\u4e00\u969c\u788d\u6301\u7eed\u51fa\u73b0\uff0c\u5efa\u8bae\u966a\u62a4\u8005\u5173\u6ce8\u4f7f\u7528\u8005\u4f4d\u7f6e\u548c\u72b6\u6001\u3002"
     if risk_type == "approaching_obstacle":
@@ -550,7 +564,130 @@ def legacy_event_dict(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-ALERT_RISK_TYPES = {"sos", "fall_detected", "prolonged_obstacle", "approaching_obstacle"}
+def parse_json_field(value: Any) -> Any:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def mobile_event_dict(row: sqlite3.Row) -> dict[str, Any]:
+    item = event_to_dict(row)
+    feedback = parse_json_field(item.get("feedback_json")) or {}
+    extra = parse_json_field(item.get("extra_json")) or {}
+    if not isinstance(feedback, dict):
+        feedback = {"raw": feedback}
+    if not isinstance(extra, dict):
+        extra = {"raw": extra}
+
+    risk_type = str(item.get("risk_type") or "none")
+    risk_level = str(item.get("risk_level") or item.get("level") or "low")
+    distance_mm = event_distance_mm(item)
+    voice_prompt = item.get("voice_prompt") or legacy_event_message(item)
+    feedback_vibration = feedback.get("vibration") if isinstance(feedback.get("vibration"), dict) else {}
+    feedback_buzzer = feedback.get("buzzer") if isinstance(feedback.get("buzzer"), dict) else {}
+    sensor_line = (
+        f"[SENSOR] front={item.get('front_cm')}cm left={item.get('left_cm')}cm "
+        f"right={item.get('right_cm')}cm down={item.get('down_cm')}cm"
+    )
+    risk_line = (
+        f"[RISK] risk={risk_level} type={risk_type} "
+        f"direction={item.get('direction') or 'none'} sensor={item.get('sensor') or 'unknown'} "
+        f"score={item.get('risk_score')}"
+    )
+
+    return {
+        "id": item.get("id"),
+        "device_id": item.get("device_id"),
+        "deviceId": item.get("device_id"),
+        "timestamp": item.get("timestamp"),
+        "level": risk_level,
+        "risk_level": risk_level,
+        "riskLevel": risk_level,
+        "risk_type": risk_type,
+        "riskType": risk_type,
+        "title": alert_title(risk_type),
+        "direction": item.get("direction") or "none",
+        "sensor": item.get("sensor") or "unknown",
+        "risk_score": item.get("risk_score"),
+        "riskScore": item.get("risk_score"),
+        "message": legacy_event_message(item),
+        "voice_prompt": voice_prompt,
+        "voicePrompt": voice_prompt,
+        "summary": f"{sensor_line}\n{risk_line}",
+        "sensorLine": sensor_line,
+        "riskLine": risk_line,
+        "distance_mm": distance_mm,
+        "distanceMm": distance_mm,
+        "distance": distance_mm,
+        "front_cm": item.get("front_cm"),
+        "left_cm": item.get("left_cm"),
+        "right_cm": item.get("right_cm"),
+        "down_cm": item.get("down_cm"),
+        "frontCm": item.get("front_cm"),
+        "leftCm": item.get("left_cm"),
+        "rightCm": item.get("right_cm"),
+        "downCm": item.get("down_cm"),
+        "distances_cm": {
+            "front": item.get("front_cm"),
+            "left": item.get("left_cm"),
+            "right": item.get("right_cm"),
+            "down": item.get("down_cm"),
+        },
+        "distancesCm": {
+            "front": item.get("front_cm"),
+            "left": item.get("left_cm"),
+            "right": item.get("right_cm"),
+            "down": item.get("down_cm"),
+        },
+        "location": {
+            "lat": item.get("lat"),
+            "lng": item.get("lng"),
+        },
+        "latitude": item.get("lat"),
+        "longitude": item.get("lng"),
+        "feedback": {
+            "buzzer": feedback_buzzer,
+            "vibration": feedback_vibration,
+            "action": feedback.get("action"),
+        },
+        "imu": {
+            "fall_detected": bool(extra.get("fall_detected")),
+            "fallDetected": bool(extra.get("fall_detected")),
+            "fall_stage": extra.get("fall_stage"),
+            "fallStage": extra.get("fall_stage"),
+            "fall_confidence": extra.get("fall_confidence"),
+            "fallConfidence": extra.get("fall_confidence"),
+            "accel_total_g": extra.get("accel_total_g"),
+            "accelTotalG": extra.get("accel_total_g"),
+        },
+        "input": {
+            "button_event": extra.get("button_event"),
+            "buttonEvent": extra.get("button_event"),
+            "touch_electrode": extra.get("touch_electrode"),
+            "touchElectrode": extra.get("touch_electrode"),
+            "touch_event": extra.get("touch_event"),
+            "touchEvent": extra.get("touch_event"),
+        },
+        "alert": {
+            "priority": alert_priority(risk_type, risk_level),
+            "target_roles": alert_target_roles(risk_type),
+            "targetRoles": alert_target_roles(risk_type),
+            "requires_attention": risk_type in ALERT_RISK_TYPES or risk_level == "high",
+            "requiresAttention": risk_type in ALERT_RISK_TYPES or risk_level == "high",
+        },
+        "nearby_history": extra.get("nearby_history"),
+        "nearbyHistory": extra.get("nearby_history"),
+    }
+
+
+ALERT_RISK_TYPES = {"sos", "fall_detected", "voice_request", "prolonged_obstacle", "approaching_obstacle"}
 
 
 def alert_title(risk_type: str) -> str:
@@ -565,6 +702,8 @@ def alert_title(risk_type: str) -> str:
 def alert_priority(risk_type: str, level: str) -> str:
     if risk_type in {"sos", "fall_detected"}:
         return "critical"
+    if risk_type == "voice_request":
+        return "info"
     if risk_type == "prolonged_obstacle" or level == "high":
         return "high"
     return "medium"
@@ -585,8 +724,16 @@ def allowed_alert_devices(role: str, user_id: Optional[str], device_id: Optional
     return devices or {"cane_001"}
 
 
+def alert_target_roles(risk_type: str) -> list[str]:
+    if risk_type in {"sos", "fall_detected"}:
+        return ["blind", "companion"]
+    if risk_type == "voice_request":
+        return ["blind"]
+    return ["companion"]
+
+
 def alert_event_payload(row: sqlite3.Row, role: str) -> dict[str, Any]:
-    event = legacy_event_dict(row)
+    event = mobile_event_dict(row)
     risk_type = event["riskType"]
     level = event["riskLevel"]
     return {
@@ -601,11 +748,15 @@ def alert_event_payload(row: sqlite3.Row, role: str) -> dict[str, Any]:
         "latitude": event["latitude"],
         "longitude": event["longitude"],
         "timestamp": event["timestamp"],
-        "targetRoles": ["blind", "companion"] if risk_type in {"sos", "fall_detected"} else ["companion"],
+        "targetRoles": alert_target_roles(risk_type),
         "forRole": role,
         "requiresAttention": True,
         "feedback": event.get("feedback"),
         "riskScore": event.get("riskScore"),
+        "distance": event.get("distance"),
+        "distancesCm": event.get("distancesCm"),
+        "imu": event.get("imu"),
+        "input": event.get("input"),
     }
 
 
@@ -625,6 +776,35 @@ def resolve_legacy_location(device_id: str, lat: Optional[float], lng: Optional[
     if latest:
         return float(latest["lat"]), float(latest["lng"])
     return 0.0, 0.0
+
+
+def latest_mobile_location_for_device(device_id: str, max_age_seconds: int = 300) -> Optional[dict[str, Any]]:
+    latest = latest_location_for_device(device_id)
+    if not latest:
+        return None
+    source = str(latest.get("source") or "").lower()
+    provider = str(latest.get("provider") or "").lower()
+    quality = str(latest.get("quality") or "").lower()
+    if "mock" in {source, provider, quality}:
+        return None
+    timestamp = latest.get("timestamp")
+    if timestamp:
+        try:
+            seen = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            if seen.tzinfo is None:
+                seen = seen.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - seen > timedelta(seconds=max_age_seconds):
+                return None
+        except ValueError:
+            pass
+    return latest
+
+
+def prefer_mobile_location(device_id: str, lat: Optional[float], lng: Optional[float]) -> tuple[float, float]:
+    latest = latest_mobile_location_for_device(device_id)
+    if latest:
+        return float(latest["lat"]), float(latest["lng"])
+    return resolve_legacy_location(device_id, lat, lng)
 
 
 def legacy_device_list() -> list[dict[str, Any]]:
@@ -852,6 +1032,8 @@ def history_score(history: dict[str, Any]) -> float:
 
 
 def choose_direction(frame: SensorFrameCreate, risk_type: str, level: str) -> str:
+    if risk_type == "voice_request":
+        return "none"
     if risk_type in {"ground_drop", "fall_detected", "sos"}:
         return "stop"
     if risk_type == "prolonged_obstacle":
@@ -896,6 +1078,12 @@ def imu_fall_score(frame: SensorFrameCreate) -> float:
 
 
 def feedback_for_risk(risk_type: str, level: str, direction: str) -> dict[str, Any]:
+    if risk_type == "voice_request":
+        return {
+            "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
+            "vibration": {"left": 0, "right": 0, "center": 0, "duration_ms": 0},
+            "action": "start_voice_input",
+        }
     if risk_type == "sos":
         return {
             "buzzer": {"enabled": True, "beeps": 5, "pattern": "sos"},
@@ -993,7 +1181,10 @@ def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, 
 
 
 def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> dict[str, Any]:
-    if frame.button_event in {"long_press", "sos"}:
+    if frame.button_event == "short_press" or frame.alert_type == "voice_request" or frame.manual_risk_type == "voice_request":
+        risk_type = "voice_request"
+        score = 1.0
+    elif frame.button_event in {"long_press", "sos"}:
         risk_type = "sos"
         score = 100.0
     elif frame.manual_risk_type in {"fall_detected", "prolonged_obstacle", "approaching_obstacle"}:
@@ -1039,6 +1230,7 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
             "user_mark": "touch",
             "sos": "sos_button",
             "fall_detected": "bmi270_imu",
+            "voice_request": "button_voice",
             "prolonged_obstacle": "tof_trend",
             "approaching_obstacle": "tof_trend",
             "history_risk": "backend_history",
@@ -1056,6 +1248,8 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
 
 
 def should_store_sensor_analysis(analysis: dict[str, Any]) -> bool:
+    if analysis["risk_type"] == "voice_request":
+        return True
     return analysis["risk_type"] in {
         "front_obstacle",
         "left_obstacle",
@@ -1064,6 +1258,7 @@ def should_store_sensor_analysis(analysis: dict[str, Any]) -> bool:
         "user_mark",
         "sos",
         "fall_detected",
+        "voice_request",
         "prolonged_obstacle",
         "approaching_obstacle",
     } and analysis["risk_level"] in {"medium", "high"}
@@ -1352,6 +1547,124 @@ def parse_route_text(text: str) -> tuple[Optional[str], Optional[str]]:
     match = re.search(r"(?:导航到|带我去|去|到|前往)(.+)", normalized)
     if match:
         return None, match.group(1).strip(" ，,。")
+    return None, normalized
+
+
+# Product-mode readable Chinese overrides. They keep the API schema unchanged
+# while replacing earlier garbled fallback strings.
+def alert_title(risk_type: str) -> str:
+    return {
+        "sos": "SOS 紧急求助",
+        "fall_detected": "疑似跌倒告警",
+        "prolonged_obstacle": "持续障碍提醒",
+        "approaching_obstacle": "障碍逼近提醒",
+    }.get(risk_type, "风险告警")
+
+
+def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, direction: str) -> str:
+    if risk_type == "sos":
+        return "SOS 已发送，请停在安全位置等待联系。"
+    if risk_type == "fall_detected":
+        return "检测到疑似跌倒，已通知盲人端和陪护端，请保持原地。"
+    if risk_type == "prolonged_obstacle":
+        return "同一障碍持续出现，已通知陪护端，请停止并重新探测。"
+    if risk_type == "approaching_obstacle":
+        return "障碍距离正在缩短，请立即减速，必要时停止。"
+    if risk_type == "ground_drop":
+        return f"下方距离约 {frame.down_cm or '-'} 厘米，可能有台阶或坑洼，请停止。"
+    if risk_type == "down_obstacle":
+        return f"下方约 {frame.down_cm or '-'} 厘米有近距离风险，请减速确认地面。"
+    if risk_type == "front_obstacle":
+        if direction == "turn_left":
+            return f"前方 {frame.front_cm or '-'} 厘米有障碍，左侧相对更安全。"
+        if direction == "turn_right":
+            return f"前方 {frame.front_cm or '-'} 厘米有障碍，右侧相对更安全。"
+        return f"前方 {frame.front_cm or '-'} 厘米有障碍，请停止确认。"
+    if risk_type == "left_obstacle":
+        return f"左侧 {frame.left_cm or '-'} 厘米有障碍，请向右保持距离。"
+    if risk_type == "right_obstacle":
+        return f"右侧 {frame.right_cm or '-'} 厘米有障碍，请向左保持距离。"
+    if risk_type == "history_risk":
+        return "附近有多人记录的历史风险点，请减速确认。"
+    if risk_type == "user_mark":
+        return "风险点已记录，并会同步给后续用户。"
+    return "当前未发现明显障碍，请继续谨慎前进。"
+
+
+def route_voice_prompt(best: Optional[dict[str, Any]]) -> str:
+    if not best:
+        return "未能生成步行路线，请检查起点和终点。"
+    risk = best.get("risk", {})
+    if risk.get("high_count", 0) > 0:
+        return "已选择综合风险较低路线，但沿途有高风险点，请减速通行。"
+    if risk.get("medium_count", 0) > 0:
+        return "已选择当前推荐路线，沿途有中风险记录，请谨慎通行。"
+    return "已选择历史风险较低路线，请继续谨慎前进。"
+
+
+def parse_route_text(text: str) -> tuple[Optional[str], Optional[str]]:
+    normalized = text.strip()
+    match = re.search(r"从(.+?)(?:到|去|前往)(.+)", normalized)
+    if match:
+        return match.group(1).strip(" ，,。."), match.group(2).strip(" ，,。.")
+    match = re.search(r"(?:导航到|带我去|去|前往)(.+)", normalized)
+    if match:
+        return None, match.group(1).strip(" ，,。.")
+    return None, normalized
+
+
+# Final product-mode Chinese overrides. Keep these after the legacy compatibility
+# helpers so firmware, Android, and backend all speak clear text.
+def alert_title(risk_type: str) -> str:
+    return {
+        "sos": "\u7528\u6237\u4e3b\u52a8 SOS",
+        "fall_detected": "\u7591\u4f3c\u8dcc\u5012\u544a\u8b66",
+        "voice_request": "\u8bed\u97f3\u4ea4\u4e92\u8bf7\u6c42",
+        "prolonged_obstacle": "\u6301\u7eed\u969c\u788d\u63d0\u9192",
+        "approaching_obstacle": "\u969c\u788d\u903c\u8fd1\u63d0\u9192",
+    }.get(risk_type, "\u98ce\u9669\u544a\u8b66")
+
+
+def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, direction: str) -> str:
+    if risk_type == "voice_request":
+        return "\u5df2\u6536\u5230\u76f2\u6756\u6309\u94ae\u8bf7\u6c42\uff0c\u8bf7\u8bf4\u51fa\u76ee\u7684\u5730\u6216\u64cd\u4f5c\u6307\u4ee4\u3002"
+    if risk_type == "sos":
+        return "SOS \u5df2\u53d1\u9001\uff0c\u5df2\u901a\u77e5\u966a\u62a4\u7aef\uff0c\u8bf7\u505c\u5728\u5b89\u5168\u4f4d\u7f6e\u7b49\u5f85\u8054\u7cfb\u3002"
+    if risk_type == "fall_detected":
+        return "\u68c0\u6d4b\u5230\u7591\u4f3c\u8dcc\u5012\uff0c\u5df2\u901a\u77e5\u76f2\u4eba\u7aef\u548c\u966a\u62a4\u7aef\uff0c\u8bf7\u4fdd\u6301\u539f\u5730\u3002"
+    if risk_type == "prolonged_obstacle":
+        return "\u540c\u4e00\u969c\u788d\u6301\u7eed\u51fa\u73b0\uff0c\u5df2\u901a\u77e5\u966a\u62a4\u7aef\uff0c\u8bf7\u505c\u6b62\u5e76\u91cd\u65b0\u63a2\u6d4b\u3002"
+    if risk_type == "approaching_obstacle":
+        return "\u969c\u788d\u8ddd\u79bb\u6b63\u5728\u7f29\u77ed\uff0c\u8bf7\u7acb\u5373\u51cf\u901f\uff0c\u5fc5\u8981\u65f6\u505c\u6b62\u3002"
+    if risk_type == "ground_drop":
+        return f"\u4e0b\u65b9\u8ddd\u79bb\u7ea6 {frame.down_cm or '-'} \u5398\u7c73\uff0c\u53ef\u80fd\u6709\u53f0\u9636\u6216\u5751\u6d3c\uff0c\u8bf7\u505c\u6b62\u3002"
+    if risk_type == "down_obstacle":
+        return f"\u4e0b\u65b9\u7ea6 {frame.down_cm or '-'} \u5398\u7c73\u6709\u8fd1\u8ddd\u79bb\u98ce\u9669\uff0c\u8bf7\u51cf\u901f\u786e\u8ba4\u5730\u9762\u3002"
+    if risk_type == "front_obstacle":
+        if direction == "turn_left":
+            return f"\u524d\u65b9 {frame.front_cm or '-'} \u5398\u7c73\u6709\u969c\u788d\uff0c\u5de6\u4fa7\u76f8\u5bf9\u66f4\u5b89\u5168\u3002"
+        if direction == "turn_right":
+            return f"\u524d\u65b9 {frame.front_cm or '-'} \u5398\u7c73\u6709\u969c\u788d\uff0c\u53f3\u4fa7\u76f8\u5bf9\u66f4\u5b89\u5168\u3002"
+        return f"\u524d\u65b9 {frame.front_cm or '-'} \u5398\u7c73\u6709\u969c\u788d\uff0c\u8bf7\u505c\u6b62\u786e\u8ba4\u3002"
+    if risk_type == "left_obstacle":
+        return f"\u5de6\u4fa7 {frame.left_cm or '-'} \u5398\u7c73\u6709\u969c\u788d\uff0c\u8bf7\u5411\u53f3\u4fdd\u6301\u8ddd\u79bb\u3002"
+    if risk_type == "right_obstacle":
+        return f"\u53f3\u4fa7 {frame.right_cm or '-'} \u5398\u7c73\u6709\u969c\u788d\uff0c\u8bf7\u5411\u5de6\u4fdd\u6301\u8ddd\u79bb\u3002"
+    if risk_type == "history_risk":
+        return "\u9644\u8fd1\u6709\u591a\u4eba\u8bb0\u5f55\u7684\u5386\u53f2\u98ce\u9669\u70b9\uff0c\u8bf7\u51cf\u901f\u786e\u8ba4\u3002"
+    if risk_type == "user_mark":
+        return "\u98ce\u9669\u70b9\u5df2\u8bb0\u5f55\uff0c\u5e76\u4f1a\u540c\u6b65\u7ed9\u540e\u7eed\u7528\u6237\u3002"
+    return "\u5f53\u524d\u672a\u53d1\u73b0\u660e\u663e\u969c\u788d\uff0c\u8bf7\u7ee7\u7eed\u8c28\u614e\u524d\u8fdb\u3002"
+
+
+def parse_route_text(text: str) -> tuple[Optional[str], Optional[str]]:
+    normalized = text.strip()
+    match = re.search(r"\u4ece(.+?)(?:\u5230|\u53bb|\u524d\u5f80)(.+)", normalized)
+    if match:
+        return match.group(1).strip(" ，。,"), match.group(2).strip(" ，。,")
+    match = re.search(r"(?:\u5bfc\u822a\u5230|\u5e26\u6211\u53bb|\u53bb|\u524d\u5f80)(.+)", normalized)
+    if match:
+        return None, match.group(1).strip(" ，。,")
     return None, normalized
 
 
@@ -1662,11 +1975,17 @@ def store_event(event: EventCreate) -> dict[str, Any]:
 
 @app.post("/api/risk-events", status_code=201)
 def create_risk_event(event: EventCreate) -> dict[str, Any]:
+    lat, lng = prefer_mobile_location(event.device_id, event.lat, event.lng)
+    if lat != event.lat or lng != event.lng:
+        event = event.model_copy(update={"lat": lat, "lng": lng})
     return store_event(event)
 
 
 @app.post("/api/events", status_code=201)
 def create_event(event: EventCreate) -> dict[str, Any]:
+    lat, lng = prefer_mobile_location(event.device_id, event.lat, event.lng)
+    if lat != event.lat or lng != event.lng:
+        event = event.model_copy(update={"lat": lat, "lng": lng})
     return store_event(event)
 
 
@@ -1675,6 +1994,24 @@ def list_events(limit: int = Query(200, ge=1, le=1000)) -> list[dict[str, Any]]:
     with db() as conn:
         rows = conn.execute("SELECT * FROM risk_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     return [event_to_dict(row) for row in rows]
+
+
+@app.get("/api/events/latest")
+def latest_event(
+    device_id: Optional[str] = Query(None),
+    raw: bool = Query(False),
+) -> dict[str, Any]:
+    query = "SELECT * FROM risk_events"
+    params: tuple[Any, ...] = ()
+    if device_id:
+        query += " WHERE device_id = ?"
+        params = (device_id,)
+    query += " ORDER BY id DESC LIMIT 1"
+    with db() as conn:
+        row = conn.execute(query, params).fetchone()
+    if not row:
+        return {"found": False, "event": None}
+    return {"found": True, "event": event_to_dict(row) if raw else mobile_event_dict(row)}
 
 
 @app.get("/api/risk-events")
@@ -1713,9 +2050,21 @@ def create_location(location: LocationCreate) -> dict[str, Any]:
 
 
 @app.post("/api/sensor-frames", status_code=201)
-def create_sensor_frame(frame: SensorFrameCreate) -> dict[str, Any]:
-    lat, lng = resolve_legacy_location(frame.device_id, frame.lat, frame.lng)
-    if frame.lat is not None and frame.lng is not None:
+def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> dict[str, Any]:
+    frame_location_is_mock = (
+        str(frame.location_provider or "").lower() == "mock"
+        or str(frame.location_quality or "").lower() == "mock"
+    )
+    if frame_location_is_mock:
+        latest_mobile = latest_mobile_location_for_device(frame.device_id)
+        if latest_mobile:
+            lat, lng = float(latest_mobile["lat"]), float(latest_mobile["lng"])
+        else:
+            lat, lng = resolve_legacy_location(frame.device_id, frame.lat, frame.lng)
+    else:
+        lat, lng = prefer_mobile_location(frame.device_id, frame.lat, frame.lng)
+
+    if frame.lat is not None and frame.lng is not None and not frame_location_is_mock:
         create_location(
             LocationCreate(
                 device_id=frame.device_id,
@@ -1764,12 +2113,29 @@ def create_sensor_frame(frame: SensorFrameCreate) -> dict[str, Any]:
                     "accel_y_g": frame.accel_y_g,
                     "accel_z_g": frame.accel_z_g,
                     "accel_total_g": frame.accel_total_g,
-                    "hardware_profile": "esp32c5_tca_ch2_3_4_5_mpr121_ch7_gpio_motors",
+                    "hardware_profile": "esp32c5_tca_ch2_3_4_5_mpr121_ch7_pca9685_ch8_9_10_bmi270",
                     "nearby_history": analysis["nearby_history"],
                 },
                 timestamp=frame.timestamp or now_iso(),
             )
         )
+        print(
+            "[SMARTCANE] event "
+            f"id={stored_event['id']} device={stored_event['device_id']} "
+            f"type={stored_event['risk_type']} level={stored_event['risk_level']} "
+            f"front={stored_event['front_cm']} left={stored_event['left_cm']} "
+            f"right={stored_event['right_cm']} down={stored_event['down_cm']}",
+            flush=True,
+        )
+
+    if lite:
+        return {
+            "accepted": True,
+            "device_id": frame.device_id,
+            "risk_type": analysis["risk_type"],
+            "risk_level": analysis["risk_level"],
+            "stored_event_id": stored_event["id"] if stored_event else None,
+        }
 
     return {
         "accepted": True,
@@ -1908,7 +2274,7 @@ def legacy_devices() -> dict[str, Any]:
 def legacy_latest_events(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
     with db() as conn:
         rows = conn.execute("SELECT * FROM risk_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-    return {"events": [legacy_event_dict(row) for row in rows]}
+    return {"events": [mobile_event_dict(row) for row in rows]}
 
 
 @app.get("/api/alerts/latest")
@@ -1935,10 +2301,16 @@ def latest_alerts(
             tuple(params + [limit]),
         ).fetchall()
 
+    alerts = [
+        alert_event_payload(row, role)
+        for row in rows
+        if role in alert_target_roles(str(row["risk_type"]))
+    ]
+
     return {
         "success": True,
         "role": role,
-        "alerts": [alert_event_payload(row, role) for row in rows],
+        "alerts": alerts,
         "devices": sorted(devices) if devices is not None else None,
     }
 

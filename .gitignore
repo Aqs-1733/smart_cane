@@ -1,4 +1,5 @@
 .DS_Store
+.codex_tmp/
 *.log
 *.tmp
 .env
@@ -27,6 +28,7 @@ __pycache__/
 *.bin
 *.hex
 *.map
+firmware/smartcane_idf_diag/
 
 # Local build/config artifacts.
 build/

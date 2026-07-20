@@ -1,6 +1,7 @@
 #pragma once
 
 #include "data_model.h"
+#include "imu_fall.h"
 
 bool connectWifi();
 bool networkAvailable();
@@ -19,6 +20,13 @@ bool uploadEvent(const RiskState &risk,
                  const DistanceReadings &distances,
                  const LocationData &location,
                  const char *extra);
+bool uploadSensorFrame(const RiskState &risk,
+                       const DistanceReadings &distances,
+                       const LocationData &location,
+                       const ImuFallState &fall,
+                       const char *alertType,
+                       const char *extra,
+                       const char *buttonEvent = nullptr);
 
 bool fetchNearbyRisks(double lat, double lng, NearbyRiskSummary &out);
 bool fetchDeepRisk(const RiskState &risk,

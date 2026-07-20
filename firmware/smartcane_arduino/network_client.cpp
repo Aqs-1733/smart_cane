@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <string.h>
 
 #include "config.h"
 
@@ -45,8 +46,10 @@ static bool postJson(const char *path, const String &body, String *responseOut =
     Serial.println(url);
     return false;
   }
-  http.setTimeout(800);
+  http.setTimeout(SMARTCANE_HTTP_TIMEOUT_MS);
+  http.setReuse(false);
   http.addHeader("Content-Type", "application/json");
+  http.addHeader("Connection", "close");
 
   int code = http.POST(body);
   String response = http.getString();
@@ -65,9 +68,11 @@ static bool postJson(const char *path, const String &body, String *responseOut =
   if (responseOut != nullptr) {
     *responseOut = response;
   }
-  Serial.print(F("[NET] POST "));
-  Serial.print(path);
-  Serial.println(F(" OK"));
+  if (strncmp(path, "/api/sensor-frames", strlen("/api/sensor-frames")) != 0) {
+    Serial.print(F("[NET] POST "));
+    Serial.print(path);
+    Serial.println(F(" OK"));
+  }
   return true;
 }
 
@@ -83,7 +88,9 @@ static bool getJson(const String &url, String &responseOut) {
     Serial.println(url);
     return false;
   }
-  http.setTimeout(800);
+  http.setTimeout(SMARTCANE_HTTP_TIMEOUT_MS);
+  http.setReuse(false);
+  http.addHeader("Connection", "close");
   int code = http.GET();
   responseOut = http.getString();
   http.end();
@@ -209,6 +216,52 @@ bool uploadEvent(const RiskState &risk,
                          distances,
                          location,
                          extra);
+}
+
+bool uploadSensorFrame(const RiskState &risk,
+                       const DistanceReadings &distances,
+                       const LocationData &location,
+                       const ImuFallState &fall,
+                       const char *alertType,
+                       const char *extra,
+                       const char *buttonEvent) {
+  DynamicJsonDocument doc(1024);
+  doc["device_id"] = SMARTCANE_DEVICE_ID;
+  doc["lat"] = location.lat;
+  doc["lng"] = location.lng;
+  doc["front_cm"] = distances.frontCm;
+  doc["left_cm"] = distances.leftCm;
+  doc["right_cm"] = distances.rightCm;
+  doc["down_cm"] = distances.downCm;
+  doc["battery"] = SMARTCANE_BATTERY_PERCENT_UNKNOWN;
+  doc["source"] = "esp32c5";
+  doc["location_provider"] = location.provider;
+  doc["location_quality"] = location.quality;
+  doc["manual_risk_type"] = risk.level == RISK_LOW ? "none" : risk.riskType;
+
+  if (alertType != nullptr && alertType[0] != '\0') {
+    doc["alert_type"] = alertType;
+  }
+  if (buttonEvent != nullptr && buttonEvent[0] != '\0') {
+    doc["button_event"] = buttonEvent;
+  }
+
+  doc["accel_x_g"] = fall.axG;
+  doc["accel_y_g"] = fall.ayG;
+  doc["accel_z_g"] = fall.azG;
+  doc["accel_total_g"] = fall.totalG;
+  bool fallAlert = alertType != nullptr && strcmp(alertType, "fall_detected") == 0;
+  doc["fall_detected"] = fallAlert || strcmp(risk.riskType, "fall_detected") == 0;
+  doc["fall_stage"] = fall.stage;
+  doc["fall_confidence"] = fall.confidence;
+
+  if (extra != nullptr && extra[0] != '\0') {
+    doc["extra"] = extra;
+  }
+
+  String body;
+  serializeJson(doc, body);
+  return postJson("/api/sensor-frames?lite=1", body);
 }
 
 bool fetchNearbyRisks(double lat, double lng, NearbyRiskSummary &out) {

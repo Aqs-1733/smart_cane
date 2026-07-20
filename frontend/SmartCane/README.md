@@ -25,7 +25,7 @@ The app uses these backend-compatible endpoints:
 
 The FastAPI backend also keeps the ESP32 endpoints under `/api/...`, so the phone app and ESP32 firmware can use the same SQLite data.
 
-The app polls `/api/alerts/latest` every few seconds on the blind and companion home screens. `fall_detected` and `sos` are shown to both roles; `prolonged_obstacle` and `approaching_obstacle` are shown to the companion role. The blind side also speaks the returned `voicePrompt`.
+The app polls `/api/alerts/latest` every few seconds on the blind and companion home screens. `fall_detected` and `sos` are shown to both roles; `prolonged_obstacle` and `approaching_obstacle` are shown to the companion role. `voice_request` is shown only to the blind role and switches the blind page into listening mode. The blind side also speaks the returned `voicePrompt`.
 
 ## Backend Address
 

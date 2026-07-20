@@ -42,6 +42,7 @@ static unsigned long lastFeedbackMs = 0;
 static unsigned long lastLocationUploadMs = 0;
 static unsigned long lastNearbyFetchMs = 0;
 static unsigned long lastDeepRiskMs = 0;
+static unsigned long lastTelemetryUploadMs = 0;
 static String serialLine;
 static RiskState stableRisk;
 static RiskState pendingRisk;
@@ -78,6 +79,7 @@ static void printVibrationStatus();
 static void printPcaProbe();
 static void repeatLastCue();
 static void handleSos();
+static void handleVoiceRequest();
 static void handleFallEvent(const ImuFallState &fall);
 static void monitorCompanionAlerts(const RiskState &risk);
 static void uploadCompanionAlert(const char *riskType, RiskLevel level, const char *reason);
@@ -88,6 +90,7 @@ static void printSensorRiskSnapshot();
 static bool recordPathPointIfMoved(const RiskState &risk);
 static void publishRiskEventIfNeeded(const RiskState &risk);
 static RiskState stabilizeRisk(const RiskState &measuredRisk);
+static unsigned long telemetryIntervalForRisk(const RiskState &risk);
 
 static void initLocation() {
   location.lat = SMARTCANE_MOCK_LAT;
@@ -272,6 +275,13 @@ static RiskState stabilizeRisk(const RiskState &measuredRisk) {
   return stableRisk;
 }
 
+static unsigned long telemetryIntervalForRisk(const RiskState &risk) {
+  if (risk.level == RISK_LOW) {
+    return SMARTCANE_TELEMETRY_LOW_RISK_INTERVAL_MS;
+  }
+  return SMARTCANE_TELEMETRY_RISK_INTERVAL_MS;
+}
+
 static bool locationCellChanged(long latCell,
                                 long lngCell,
                                 bool &hasLast,
@@ -446,7 +456,7 @@ static void repeatLastCue() {
 }
 
 static void maybeAutoUploadRisk() {
-  if (!networkMode || currentRisk.level != RISK_HIGH) {
+  if (!networkMode || currentRisk.level == RISK_LOW) {
     return;
   }
   if (strcmp(currentRisk.riskType, "history_risk") == 0) {
@@ -480,6 +490,22 @@ static void handleSos() {
   uploadEvent(currentRisk, distances, location, "source=sos_button");
 }
 
+static void handleVoiceRequest() {
+  Serial.println(F("[VOICE] button short press -> phone voice input request"));
+  beep(60);
+  if (!networkMode) {
+    Serial.println(F("[VOICE] local mode; phone request not uploaded"));
+    return;
+  }
+  uploadSensorFrame(currentRisk,
+                    distances,
+                    location,
+                    imuFallCurrent(),
+                    "voice_request",
+                    "source=button_short_press",
+                    "short_press");
+}
+
 static void handleFallEvent(const ImuFallState &fall) {
   RiskState fallRisk;
   fallRisk.level = RISK_HIGH;
@@ -491,8 +517,24 @@ static void handleFallEvent(const ImuFallState &fall) {
   fallRisk.detectedAtMs = millis();
   currentRisk = fallRisk;
 
-  Serial.println(F("[FALL] detected by BMI270; buzzer only, no vibration"));
-  imuFallPrintStatus();
+  Serial.println();
+  Serial.println(F("========================================"));
+  Serial.println(F("!!! FALL DETECTED !!!"));
+  Serial.println(F("risk=HIGH type=fall_detected sensor=BMI270"));
+  Serial.println(F("action=BUZZER_ONLY notify=blind_and_companion"));
+  Serial.print(F("imu g="));
+  Serial.print(fall.totalG, 2);
+  Serial.print(F(" pitch="));
+  Serial.print(fall.pitchDeg, 1);
+  Serial.print(F(" roll="));
+  Serial.print(fall.rollDeg, 1);
+  Serial.print(F(" stage="));
+  Serial.print(fall.stage);
+  Serial.print(F(" reason="));
+  Serial.println(fall.reason);
+  Serial.println(F("========================================"));
+  Serial.println();
+  buzzerSetEnabled(true);
   beepPatternSos();
   recordPathPoint(fallRisk);
 
@@ -543,8 +585,7 @@ static void uploadCompanionAlert(const char *riskType, RiskLevel level, const ch
 static bool isObstacleRisk(const RiskState &risk) {
   return strcmp(risk.riskType, "front_obstacle") == 0 ||
          strcmp(risk.riskType, "left_obstacle") == 0 ||
-         strcmp(risk.riskType, "right_obstacle") == 0 ||
-         strcmp(risk.riskType, "down_obstacle") == 0;
+         strcmp(risk.riskType, "right_obstacle") == 0;
 }
 
 static void monitorCompanionAlerts(const RiskState &risk) {
@@ -598,20 +639,11 @@ static void handleButtonEvent(ButtonEventType type) {
   }
 
   if (type == BUTTON_EVENT_DOUBLE_CLICK) {
-    uploadUserMark("source=button_double_click");
-    vibrateCenter(SMARTCANE_VIB_LEVEL_MEDIUM, 160);
+    handleVoiceRequest();
     return;
   }
 
-  tofRead(distances);
-  currentRisk = stabilizeRisk(calculateRisk(distances, nearby));
-  printSensorRiskSnapshot();
-  if (currentRisk.level != RISK_LOW) {
-    applyFeedbackForRisk(currentRisk, true);
-  } else {
-    Serial.println(F("[BUTTON] clear road"));
-    beep(40);
-  }
+  handleVoiceRequest();
 }
 
 static void handleTouchEvent(uint8_t electrode, TouchEventType type) {
@@ -714,10 +746,10 @@ static void publishRiskEventIfNeeded(const RiskState &risk) {
     applyFeedbackForRisk(risk, true);
   }
 
-  if (risk.level == RISK_HIGH) {
+  if (risk.level != RISK_LOW) {
     recordPathPoint(risk);
     maybeAutoUploadRisk();
-    if (networkMode && networkAvailable()) {
+    if (risk.level == RISK_HIGH && networkMode && networkAvailable()) {
       lastDeepRiskMs = millis();
       fetchDeepRisk(risk, distances, location, deepRisk);
     }
@@ -765,12 +797,12 @@ static void printVibrationStatus() {
   Serial.print(F(SMARTCANE_BUILD_TAG));
   Serial.print(F(" mode="));
   Serial.print(vibrationModeName());
-  Serial.print(F(" pins L/R/C="));
-  Serial.print(SMARTCANE_VIB_LEFT_PIN);
+  Serial.print(F(" pca_ch L/R/C="));
+  Serial.print(SMARTCANE_VIB_LEFT_CHANNEL);
   Serial.print(F("/"));
-  Serial.print(SMARTCANE_VIB_RIGHT_PIN);
+  Serial.print(SMARTCANE_VIB_RIGHT_CHANNEL);
   Serial.print(F("/"));
-  Serial.println(SMARTCANE_VIB_CENTER_PIN);
+  Serial.println(SMARTCANE_VIB_CENTER_CHANNEL);
 }
 
 static void printPcaProbe() {
@@ -780,17 +812,6 @@ static void printPcaProbe() {
   Serial.print(SMARTCANE_I2C_CLOCK_HZ);
   Serial.print(F(" result="));
   Serial.println(i2cProbe(SMARTCANE_PCA9685_ADDR) ? F("found") : F("not_found"));
-}
-
-static MockScenario parseMockScenario(const String &name) {
-  if (name == "clear") return MOCK_SCENARIO_CLEAR;
-  if (name == "warn" || name == "front_warn") return MOCK_SCENARIO_FRONT_WARN;
-  if (name == "danger" || name == "front_danger") return MOCK_SCENARIO_FRONT_DANGER;
-  if (name == "drop" || name == "ground_drop") return MOCK_SCENARIO_GROUND_DROP;
-  if (name == "blocked" || name == "stop") return MOCK_SCENARIO_BLOCKED;
-  if (name == "left" || name == "left_open") return MOCK_SCENARIO_LEFT_OPEN;
-  if (name == "right" || name == "right_open") return MOCK_SCENARIO_RIGHT_OPEN;
-  return MOCK_SCENARIO_AUTO;
 }
 
 static void processCommand(String command) {
@@ -811,6 +832,8 @@ static void processCommand(String command) {
   } else if (command == "raw" || command == "tofraw") {
     tofPrintRawReadings();
   } else if (command == "scan") {
+    imuFallPreparePins();
+    delay(80);
     i2cScanRoot();
     i2cScanTcaChannels();
   } else if (command == "pca" || command == "pca9685") {
@@ -819,39 +842,40 @@ static void processCommand(String command) {
     touchPrintRaw();
   } else if (command == "imu") {
     imuFallPrintStatus();
+  } else if (command == "imurescan") {
+    imuFallRescan();
+    imuFallPrintStatus();
   } else if (command == "imuraw") {
     imuFallPrintRaw();
-  } else if (command == "fall") {
-    Serial.println(F("[TEST] mock fall event"));
-    imuFallMockTrigger();
-  } else if (command == "fallclear") {
-    Serial.println(F("[TEST] fall state clear"));
-    imuFallClear();
+  } else if (command == "imustream" || command == "imustream on") {
+    imuFallSetStream(true);
+  } else if (command == "imustream off") {
+    imuFallSetStream(false);
   } else if (command == "vib" || command == "vibration" || command == "motor" || command == "vib status") {
     printVibrationStatus();
   } else if (command == "vib left" || command == "motor 1" || command == "m1") {
-    Serial.println(F("[TEST] vibrate left"));
+    Serial.println(F("[CMD] vibrate left"));
     vibrateLeft(SMARTCANE_VIB_LEVEL_HIGH, 500);
   } else if (command == "vib right" || command == "motor 2" || command == "m2") {
-    Serial.println(F("[TEST] vibrate right"));
+    Serial.println(F("[CMD] vibrate right"));
     vibrateRight(SMARTCANE_VIB_LEVEL_HIGH, 500);
   } else if (command == "vib center" || command == "vib centre" || command == "motor 3" || command == "m3") {
-    Serial.println(F("[TEST] vibrate center"));
+    Serial.println(F("[CMD] vibrate center"));
     vibrateCenter(SMARTCANE_VIB_LEVEL_HIGH, 500);
   } else if (command == "vib all" || command == "motor all" || command == "mall") {
-    Serial.println(F("[TEST] vibrate all"));
+    Serial.println(F("[CMD] vibrate all"));
     vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, 500);
   } else if (command == "vib stop" || command == "motor stop" || command == "mstop") {
-    Serial.println(F("[TEST] vibration stop"));
+    Serial.println(F("[CMD] vibration stop"));
     vibrationStopAll();
   } else if (command == "beep") {
-    Serial.println(F("[TEST] beep short"));
+    Serial.println(F("[CMD] beep short"));
     beep(160);
   } else if (command == "beep danger") {
-    Serial.println(F("[TEST] beep danger"));
+    Serial.println(F("[CMD] beep danger"));
     beepPatternDanger();
   } else if (command == "beep sos") {
-    Serial.println(F("[TEST] beep sos"));
+    Serial.println(F("[CMD] beep sos"));
     beepPatternSos();
   } else if (command == "buzzer on") {
     buzzerSetEnabled(true);
@@ -891,10 +915,6 @@ static void processCommand(String command) {
     Serial.println(networkMode ? F("network") : F("local"));
   } else if (command == "path") {
     printPathRecords();
-  } else if (command.startsWith("mock")) {
-    String arg = command.substring(4);
-    arg.trim();
-    tofSetMockScenario(parseMockScenario(arg));
   } else if (command.startsWith("t") && command.length() >= 2) {
     uint8_t electrode = command.charAt(1) - '0';
     TouchEventType eventType = command.endsWith("long") ? TOUCH_EVENT_LONG_PRESS : TOUCH_EVENT_TAP;
@@ -929,20 +949,21 @@ static void printHelp() {
   Serial.println(F("  stream raw    print live raw VL53L1X millimeter readings"));
   Serial.println(F("  scan          scan root I2C and TCA channels"));
   Serial.println(F("  touchraw      print MPR121 touched/filter/baseline values"));
-  Serial.println(F("  imu|imuraw    print BMI270 fall detector status/raw accel"));
-  Serial.println(F("  fall|fallclear simulate/clear fall emergency alert"));
+  Serial.println(F("  imu|imurescan print BMI270 fall detector status/rescan"));
+  Serial.println(F("  imuraw        print one BMI270 raw accel sample"));
+  Serial.println(F("  imustream on/off print brief BMI270 fall state"));
   Serial.println(F("  vib left|right|center|all|stop|status"));
-  Serial.println(F("  m1|m2|m3|mall|mstop test teacher GPIO ON/OFF on pins 8/9/10"));
+  Serial.println(F("  m1|m2|m3|mall|mstop drive PCA9685 motor channels 8/9/10"));
   Serial.println(F("  beep|beep danger|beep sos|buzzer on|buzzer off"));
-  Serial.println(F("  mock auto|clear|warn|danger|drop|blocked|left|right"));
   Serial.println(F("  nearby        fetch /api/risks/nearby"));
   Serial.println(F("  deep          call backend /api/ai/deep-risk"));
   Serial.println(F("  mark          upload user_mark risk event"));
-  Serial.println(F("  sos           simulate SOS long press"));
-  Serial.println(F("  btn|btndouble|btnlong simulate physical button"));
+  Serial.println(F("  sos           trigger SOS action from serial"));
+  Serial.println(F("  btn|btndouble  request phone voice input"));
+  Serial.println(F("  btnlong        trigger SOS action"));
   Serial.println(F("  mode          toggle local/network mode"));
   Serial.println(F("  path          print local route ring buffer"));
-  Serial.println(F("  t0 t1long t2 t3 t4 t5 simulate touch events"));
+  Serial.println(F("  t0 t1long t2 t3 t4 t5 run touch actions"));
 }
 
 void setup() {
@@ -961,11 +982,14 @@ void setup() {
   initLocation();
   buzzerBegin();
   Serial.flush();
+  imuFallPreparePins();
+  delay(80);
+  Serial.flush();
   i2cBusBegin();
   Serial.flush();
-  tofBegin();
-  Serial.flush();
   imuFallBegin();
+  Serial.flush();
+  tofBegin();
   Serial.flush();
   touchBegin();
   Serial.flush();
@@ -978,7 +1002,7 @@ void setup() {
   Serial1.begin(SMARTCANE_GNSS_BAUD, SERIAL_8N1, SMARTCANE_GNSS_RX_PIN, SMARTCANE_GNSS_TX_PIN);
   Serial.println(F("[GNSS] enabled on Serial1"));
 #else
-  Serial.println(F("[GNSS] disabled; using mock/mobile-replaceable location"));
+  Serial.println(F("[GNSS] disabled; backend will prefer recent Android/Amap location"));
 #endif
 
   connectWifi();
@@ -992,7 +1016,9 @@ void setup() {
   tofRead(distances);
   currentRisk = stabilizeRisk(calculateRisk(distances, nearby));
   recordPathPointIfMoved(currentRisk);
+#if !SMARTCANE_PRODUCT_MODE
   printHelp();
+#endif
   printStatus();
   publishRiskEventIfNeeded(currentRisk);
 }
@@ -1049,6 +1075,17 @@ void loop() {
     if (networkMode && networkAvailable() && moved) {
       uploadLocation(location);
     }
+  }
+
+  if (networkMode && networkAvailable() &&
+      now - lastTelemetryUploadMs >= telemetryIntervalForRisk(currentRisk)) {
+    lastTelemetryUploadMs = now;
+    uploadSensorFrame(currentRisk,
+                      distances,
+                      location,
+                      imuFallCurrent(),
+                      nullptr,
+                      "source=periodic_real_frame");
   }
 
   if (networkMode && networkAvailable() && now - lastNearbyFetchMs >= SMARTCANE_NEARBY_FETCH_INTERVAL_MS) {

@@ -5,6 +5,7 @@
 
 bool i2cBusBegin();
 bool selectTcaChannel(uint8_t channel);
+bool disableTcaChannels();
 bool i2cProbe(uint8_t address);
 void i2cScanRoot();
 void i2cScanCurrentBus(const char *label);

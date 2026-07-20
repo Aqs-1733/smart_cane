@@ -1,6 +1,11 @@
 ﻿package com.nankai.smartcane.viewmodel
 
 import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import com.nankai.smartcane.data.local.DemoData
 import com.nankai.smartcane.data.local.LocalAppPreferences
@@ -45,6 +50,8 @@ class SmartCaneAppController private constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var tts: TextToSpeech? = null
     private var ttsReady = false
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var voiceRecognitionActive = false
     private var blindPollingJob: Job? = null
     private var companionPollingJob: Job? = null
     private var alertPollingJob: Job? = null
@@ -304,9 +311,20 @@ class SmartCaneAppController private constructor(
                         val newest = result.data.maxByOrNull { it.id }
                         if (newest != null && newest.id > lastAlertId) {
                             lastAlertId = newest.id
-                            _uiState.update { it.copy(urgentAlert = newest, message = newest.title) }
-                            if (role == "blind") {
-                                speakText(newest.voicePrompt.ifBlank { newest.message })
+                            if (newest.riskType == "voice_request" && role == "blind") {
+                                _uiState.update {
+                                    it.copy(
+                                        urgentAlert = null,
+                                        voiceState = VoiceState.Speaking,
+                                        message = "盲杖按钮已触发"
+                                    )
+                                }
+                                speakText(newest.voicePrompt.ifBlank { newest.message }, listenAfter = true)
+                            } else {
+                                _uiState.update { it.copy(urgentAlert = newest, message = newest.title) }
+                                if (role == "blind") {
+                                    speakText(newest.voicePrompt.ifBlank { newest.message })
+                                }
                             }
                         }
                     }
@@ -327,11 +345,9 @@ class SmartCaneAppController private constructor(
     }
 
     fun toggleVoiceListening() {
-        _uiState.update {
-            when (it.voiceState) {
-                VoiceState.Listening -> it.copy(voiceState = VoiceState.Idle, message = "已收到")
-                else -> it.copy(voiceState = VoiceState.Listening, message = null)
-            }
+        when (_uiState.value.voiceState) {
+            VoiceState.Listening -> stopVoiceListening("已收到")
+            else -> startVoiceListening()
         }
     }
 
@@ -341,6 +357,10 @@ class SmartCaneAppController private constructor(
     }
 
     fun speakText(text: String) {
+        speakText(text, listenAfter = false)
+    }
+
+    private fun speakText(text: String, listenAfter: Boolean) {
         _uiState.update { it.copy(lastSpokenText = text, voiceState = VoiceState.Speaking, message = "正在播报") }
         val engine = tts
         if (engine == null) {
@@ -356,8 +376,105 @@ class SmartCaneAppController private constructor(
         }
         scope.launch {
             delay(1600L)
-            _uiState.update { if (it.voiceState == VoiceState.Speaking) it.copy(voiceState = VoiceState.Idle) else it }
+            if (listenAfter) {
+                startVoiceListening()
+            } else {
+                _uiState.update {
+                    if (it.voiceState == VoiceState.Speaking) {
+                        it.copy(voiceState = VoiceState.Idle)
+                    } else {
+                        it
+                    }
+                }
+            }
         }
+    }
+
+    private fun startVoiceListening() {
+        if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
+            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "手机不支持系统语音识别") }
+            return
+        }
+
+        val recognizer = speechRecognizer ?: SpeechRecognizer.createSpeechRecognizer(appContext).also {
+            speechRecognizer = it
+            it.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    _uiState.update { state -> state.copy(voiceState = VoiceState.Listening, message = "正在听你说") }
+                }
+
+                override fun onBeginningOfSpeech() {
+                    _uiState.update { state -> state.copy(message = "正在识别") }
+                }
+
+                override fun onRmsChanged(rmsdB: Float) = Unit
+                override fun onBufferReceived(buffer: ByteArray?) = Unit
+
+                override fun onEndOfSpeech() {
+                    voiceRecognitionActive = false
+                    _uiState.update { state -> state.copy(message = "正在理解") }
+                }
+
+                override fun onError(error: Int) {
+                    voiceRecognitionActive = false
+                    val message = when (error) {
+                        SpeechRecognizer.ERROR_NO_MATCH -> "没听清，请再按一次按钮"
+                        SpeechRecognizer.ERROR_AUDIO -> "麦克风异常"
+                        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "语音网络不可用"
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "请给 App 开启麦克风权限"
+                        else -> "语音识别失败，请再试一次"
+                    }
+                    _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = message) }
+                }
+
+                override fun onResults(results: Bundle?) {
+                    voiceRecognitionActive = false
+                    val text = results
+                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        ?.firstOrNull()
+                        ?.trim()
+                    if (text.isNullOrBlank()) {
+                        _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = "没听清，请再试一次") }
+                        return
+                    }
+
+                    scope.launch {
+                        _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = "你说：$text") }
+                        when (val result = SmartCaneApiClient.postVoiceRoute(text, null, null)) {
+                            is ApiResult.Success -> speakText(result.data.voicePrompt.ifBlank { "已收到路线请求" })
+                            is ApiResult.Failure -> speakText("语音指令已收到，但后端暂时不可用")
+                        }
+                    }
+                }
+
+                override fun onPartialResults(partialResults: Bundle?) = Unit
+                override fun onEvent(eventType: Int, params: Bundle?) = Unit
+            })
+        }
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "请说出目的地或操作指令")
+        }
+
+        try {
+            voiceRecognitionActive = true
+            _uiState.update { it.copy(voiceState = VoiceState.Listening, message = "正在听你说") }
+            recognizer.startListening(intent)
+        } catch (_: SecurityException) {
+            voiceRecognitionActive = false
+            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "请在系统设置中开启麦克风权限") }
+        }
+    }
+
+    private fun stopVoiceListening(message: String) {
+        if (voiceRecognitionActive) {
+            speechRecognizer?.stopListening()
+        }
+        voiceRecognitionActive = false
+        _uiState.update { it.copy(voiceState = VoiceState.Idle, message = message) }
     }
 
     fun sendBlindSos() {
@@ -382,6 +499,9 @@ class SmartCaneAppController private constructor(
         tts?.shutdown()
         tts = null
         ttsReady = false
+        speechRecognizer?.destroy()
+        speechRecognizer = null
+        voiceRecognitionActive = false
     }
 
     fun relation(): CareRelation? {

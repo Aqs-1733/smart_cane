@@ -2,7 +2,7 @@
 
 This repository now uses the Arduino IDE / Arduino framework as the primary firmware path.
 
-The system demonstrates a practical ESP32-C5 multi-device collaborative smart cane:
+The system implements a practical ESP32-C5 multi-device collaborative smart cane:
 
 - local obstacle and ground-drop risk detection,
 - vibration and buzzer feedback,
@@ -12,7 +12,7 @@ The system demonstrates a practical ESP32-C5 multi-device collaborative smart ca
 - nearby historical risk lookup for collaborative mapping,
 - backend-side lightweight deep-risk scoring and optional cloud LLM advice.
 
-Local safety remains rule-based and offline-capable. Network, deep-risk scoring, and LLM advice only enhance demos and do not replace local obstacle avoidance.
+Local safety remains rule-based and offline-capable. Network, deep-risk scoring, and LLM advice only enrich phone/backend feedback and do not replace local obstacle avoidance.
 
 Private reference PDFs and API keys must not be committed or uploaded.
 
@@ -54,10 +54,10 @@ docs/
 | TCA9548A | I2C multiplexer for four identical VL53L1X ToF sensors |
 | 4 x VL53L1X | Front, left, right, and down distance sensing |
 | MPR121 / HW-017 | Capacitive touch handle |
-| PCA9685 PWM/Servo Shield | ON/OFF output for three vibration motors on channels 8/9/10 |
+| PCA9685 PWM/Servo Shield | Blue motor PWM board on root I2C, address `0x40` |
 | 3 x 1027 3V vibration motors | Left, right, and center tactile feedback through PCA9685 channels |
 | Active buzzer | High-risk, ground-drop, and SOS alert |
-| SOS button | Physical long-press emergency trigger |
+| Physical button | Short press requests Android voice input; long press triggers SOS |
 
 Recommended current bench wiring from the Arduino screenshots:
 
@@ -72,13 +72,20 @@ Recommended current bench wiring from the Arduino screenshots:
 | Down VL53L1X | TCA `CH5` |
 | MPR121 | TCA `CH7`, address `0x5A` |
 | PCA9685 | root I2C, address `0x40` |
-| Left vibration plug | PCA9685 `CH8` |
-| Right vibration plug | PCA9685 `CH9` |
-| Center vibration plug | PCA9685 `CH10` |
+| Left vibration signal | PCA9685 `CH8` PWM/SIG, red to `V+`, black/brown to `GND` |
+| Right vibration signal | PCA9685 `CH9` PWM/SIG, red to `V+`, black/brown to `GND` |
+| Center vibration signal | PCA9685 `CH10` PWM/SIG, red to `V+`, black/brown to `GND` |
 | Buzzer | `GPIO4` |
-| SOS button | `GPIO5`, active low |
+| Physical button | `GPIO5`, active low; short press `voice_request`, long press `sos` |
 
 If you rewire ToF sensors back to `CH0/CH1/CH2/CH3`, edit only `firmware/smartcane_arduino/config.h`.
+
+Power note for the standalone cane:
+
+- ESP32-C5/SensairShuttle: power by USB-C 5V during development, or by the board-supported 3.7V Li-ion battery connector if available.
+- PCA9685 blue motor board: motor `V+` can use the separate 3.7V battery already wired for the vibration motors.
+- The ESP32 GND, PCA9685 logic GND, and motor battery GND must be common ground.
+- PCA9685 logic `VCC` should be tied to ESP32 3.3V logic power; do not power ESP32 logic from the motor `V+` rail.
 
 ## Arduino Libraries
 
@@ -112,7 +119,9 @@ Configure device, Wi-Fi, backend URL, thresholds, GPIO, I2C channels, and mock r
 firmware/smartcane_arduino/config.h
 ```
 
-Use your PC LAN IP for the backend URL, for example:
+Use your PC LAN IP for local testing. If the cane connects to a phone hotspot,
+connect the PC, ESP32-C5, and Android test phone to the same hotspot and use
+the PC hotspot/LAN IPv4:
 
 ```cpp
 #define SMARTCANE_SERVER_BASE_URL "http://192.168.1.100:8000"
@@ -137,7 +146,7 @@ Health check:
 http://127.0.0.1:8000/api/health
 ```
 
-Useful demo endpoints:
+Useful operation endpoints:
 
 - `POST /api/locations`: route point upload
 - `GET /api/locations/history?device_id=cane_001`
@@ -157,19 +166,21 @@ Android frontend compatibility endpoints:
 
 Cloud LLM and speech services are optional. Put keys only in `backend/.env`; never commit real secrets.
 
-## Closed-Loop Demo
+## Closed-Loop Run
 
 1. Start the backend.
 2. Flash the Arduino firmware with `SMARTCANE_DEVICE_ID="cane_001"`.
 3. Run `status` or `read` in Serial Monitor to print one ToF/risk snapshot.
-4. Put an obstacle in front. The firmware prints one risk event, vibrates the center motor, and high danger beeps.
+4. Put an obstacle in front. The firmware samples every `500 ms`, prints one changed risk event, vibrates the center motor, and high danger beeps.
 5. Keep the cane still with the same obstacle. The same place/same risk is not printed, vibrated, or uploaded repeatedly.
 6. Leave more space on the left or right, clear the risk and trigger it again, or move into another location grid. The matching motor suggests the safer bypass direction and a new event can be recorded.
-7. Raise the down-facing sensor or run `mock drop`. The firmware detects a ground-drop risk, vibrates strongly, beeps, and uploads `ground_drop` once for that place.
+7. Raise the down-facing sensor. The firmware detects a ground-drop risk, vibrates strongly, beeps, and uploads `ground_drop` once for that place.
 8. Long-press touch electrode E1 or run `mark`. The backend records `user_mark` at the current route point.
 9. Run `path` to print the local route/risk ring buffer.
 10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`. The second cane receives historical risk statistics and fuses them into local risk.
-11. Hold the SOS button for 2 seconds or run `sos`. The cane vibrates, beeps, prints SOS, and uploads `sos`.
+11. Short-press the physical button or run `btn`: the cane uploads `voice_request`; the blind Android app enters voice interaction mode. The companion app does not receive this ordinary voice request.
+12. Hold the physical button for 2 seconds or run `sos`: the cane vibrates, beeps, prints SOS, uploads `sos`, and the backend distinguishes it from `fall_detected`.
+13. For fall detection, drop/tilt the BMI270 board onto a soft cushion and keep it sideways briefly. The cane uses buzzer only, uploads `fall_detected`, and the backend exposes it to both blind and companion app roles.
 
 Serial commands are listed in `firmware/smartcane_arduino/README.md`.
 

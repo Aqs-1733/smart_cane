@@ -2,9 +2,11 @@
 
 FastAPI + SQLite backend for the ESP32-C5 smart cane project.
 
-It stores risk events, stores device locations, returns nearby risk statistics, runs a lightweight backend-side deep-learning risk scorer, and optionally calls a cloud LLM/STT provider for demo advice and voice-command parsing.
+It stores risk events, stores device locations, returns nearby risk statistics, runs a lightweight backend-side deep-learning risk scorer, and optionally calls a cloud LLM/STT provider for assisted advice and voice-command parsing.
 
 Do not put real API keys in Git. Keep secrets in `backend/.env`.
+
+The ESP32-C5 firmware now uploads both event-driven risk records and periodic real sensor frames. The local safety loop remains on the cane; this backend stores collaborative map risk points, exposes alerts to the blind/companion Android roles, and calls Amap/LLM services when configured.
 
 ## Install
 
@@ -47,7 +49,7 @@ Amap / Gaode:
 | GET | `/api/locations/latest` | latest location for one device |
 | GET | `/api/locations/history` | recent location history for one device |
 | POST | `/api/sensor-frames` | hardware-adapted four-ToF frame upload and feedback analysis |
-| GET | `/api/alerts/latest` | blind/companion urgent alerts, including fall and escalated obstacle alerts |
+| GET | `/api/alerts/latest` | blind/companion alerts; `voice_request` goes only to blind side |
 | GET | `/api/hardware/profile` | ESP32-C5 wiring, active levels, touch, and motor mapping |
 | GET | `/api/risks/nearby` | nearby collaborative risk summary |
 | GET | `/api/map/status` | Amap key/config status |
@@ -88,9 +90,11 @@ These endpoints read and write the same SQLite tables as `/api/risk-events` and 
 - down ToF: TCA `CH5`
 - touch MPR121: TCA `CH7`
 - buzzer: GPIO `4`, low-level trigger
-- SOS button: GPIO `5`, active low, long press
-- vibration motors: teacher GPIO HIGH/LOW logic, left `GPIO8`, right `GPIO9`, center `GPIO10`
+- physical button: GPIO `5`, active low. Short press requests Android voice input; long press uploads `sos`.
+- vibration motors: PCA9685 blue board on root I2C `0x40`; left `CH8`, right `CH9`, center `CH10`. Do not use ESP32 GPIO `8/9/10` because they are reserved by the BMI270/BMM350 shuttle board path.
 - built-in BMI270 IMU: fall detection; BMM350 is heading reference only, not GPS/location
+
+If the Android app has uploaded a recent non-mock Amap location for the same `device_id`, the backend uses that phone location for risk events and sensor frames. Firmware mock coordinates are only a fallback.
 
 Example:
 
@@ -109,6 +113,8 @@ Example:
 ```
 
 Response includes `risk.risk_score`, `risk.voice_prompt`, and `risk.feedback`. The frontend can speak `voice_prompt`; firmware can keep using local buzzer/motor rules offline.
+
+Button short press from firmware is sent as `alert_type="voice_request"` and `button_event="short_press"`. The backend stores it as a low-level operation event, exposes it only to the blind app through `/api/alerts/latest`, and does not notify the companion side or mark it as a map risk.
 
 Fall upload example:
 
@@ -194,7 +200,7 @@ The `voice_prompt` field is LLM-enhanced when `ARK_API_KEY` or `OPENAI_API_KEY` 
 
 The model is `tiny-mlp-risk-v1`, implemented in `backend/deep_model.py`. It runs on the backend only; ESP32-C5 local obstacle avoidance remains rule-based and offline-safe.
 
-## Collaborative Demo
+## Collaborative Run
 
 1. Start the backend.
 2. Flash `cane_001`, trigger a `user_mark`, `front_obstacle`, or `ground_drop`.

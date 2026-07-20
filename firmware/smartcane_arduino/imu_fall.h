@@ -24,10 +24,12 @@ struct ImuFallState {
 };
 
 bool imuFallBegin();
+void imuFallPreparePins();
+bool imuFallRescan();
 void imuFallUpdate();
 bool imuFallConsumeEvent(ImuFallState &out);
 ImuFallState imuFallCurrent();
-void imuFallMockTrigger();
 void imuFallClear();
 void imuFallPrintStatus();
 void imuFallPrintRaw();
+void imuFallSetStream(bool enabled);
