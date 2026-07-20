@@ -8,7 +8,7 @@
 static VL53L1X sensors[4];
 static bool sensorReady[4] = {false, false, false, false};
 static bool mockActive = false;
-static MockScenario mockScenario = MOCK_SCENARIO_AUTO;
+static MockScenario mockScenario = SMARTCANE_MOCK_DEFAULT_SCENARIO;
 static int filteredCm[4] = {400, 400, 400, SMARTCANE_GROUND_BASE_CM};
 static uint8_t failCount[4] = {0, 0, 0, 0};
 
@@ -57,8 +57,10 @@ static bool beginOneSensor(uint8_t index) {
   }
 
   sensors[index].setDistanceMode(VL53L1X::Long);
-  sensors[index].setMeasurementTimingBudget(50000);
-  sensors[index].startContinuous(80);
+  sensors[index].setMeasurementTimingBudget(SMARTCANE_TOF_TIMING_BUDGET_US);
+#if !SMARTCANE_TOF_SINGLE_SHOT_READ
+  sensors[index].startContinuous(SMARTCANE_TOF_CONTINUOUS_PERIOD_MS);
+#endif
   return true;
 }
 
@@ -141,6 +143,14 @@ static void fillMock(DistanceReadings &out) {
   out.timestampMs = millis();
 }
 
+static uint16_t readRawMm(uint8_t index) {
+#if SMARTCANE_TOF_SINGLE_SHOT_READ
+  return sensors[index].readSingle(true);
+#else
+  return sensors[index].read(true);
+#endif
+}
+
 bool tofRead(DistanceReadings &out) {
   out.timestampMs = millis();
   if (mockActive) {
@@ -158,7 +168,7 @@ bool tofRead(DistanceReadings &out) {
       continue;
     }
 
-    uint16_t rawMm = sensors[i].read(false);
+    uint16_t rawMm = readRawMm(i);
     bool ok = !sensors[i].timeoutOccurred();
     int cm = ok ? mmToCm(rawMm) : -1;
     values[i] = filterCm(i, cm);
@@ -176,6 +186,53 @@ bool tofRead(DistanceReadings &out) {
   out.downValid = valids[3];
   out.valid = anyValid;
   return anyValid;
+}
+
+void tofPrintRawReadings() {
+  if (mockActive) {
+    DistanceReadings mock;
+    fillMock(mock);
+    Serial.print(F("[TOF_RAW] mock front_cm="));
+    Serial.print(mock.frontCm);
+    Serial.print(F(" left_cm="));
+    Serial.print(mock.leftCm);
+    Serial.print(F(" right_cm="));
+    Serial.print(mock.rightCm);
+    Serial.print(F(" down_cm="));
+    Serial.println(mock.downCm);
+    return;
+  }
+
+  for (uint8_t i = 0; i < 4; ++i) {
+    Serial.print(F("[TOF_RAW] "));
+    Serial.print(tofNames[i]);
+    Serial.print(F(" CH"));
+    Serial.print(tofChannels[i]);
+    Serial.print(F(" ready="));
+    Serial.print(sensorReady[i] ? F("1") : F("0"));
+
+    if (!sensorReady[i]) {
+      Serial.println();
+      continue;
+    }
+
+    if (!selectTcaChannel(tofChannels[i])) {
+      Serial.println(F(" tca_select=fail"));
+      continue;
+    }
+
+    uint16_t rawMm = readRawMm(i);
+    bool timeout = sensors[i].timeoutOccurred();
+    int cm = timeout ? -1 : mmToCm(rawMm);
+    Serial.print(F(" raw_mm="));
+    Serial.print(rawMm);
+    Serial.print(F(" cm="));
+    Serial.print(cm);
+    Serial.print(F(" timeout="));
+    Serial.print(timeout ? F("1") : F("0"));
+    Serial.print(F(" valid="));
+    Serial.println(cm >= 0 ? F("1") : F("0"));
+  }
 }
 
 bool tofMockActive() {

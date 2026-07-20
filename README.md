@@ -54,8 +54,8 @@ docs/
 | TCA9548A | I2C multiplexer for four identical VL53L1X ToF sensors |
 | 4 x VL53L1X | Front, left, right, and down distance sensing |
 | MPR121 / HW-017 | Capacitive touch handle |
-| PCA9685 | PWM driver for three vibration motors |
-| 3 x 1027 3V vibration motors | Left, right, and center tactile feedback through MOS drivers |
+| PCA9685 PWM/Servo Shield | ON/OFF output for three vibration motors on channels 8/9/10 |
+| 3 x 1027 3V vibration motors | Left, right, and center tactile feedback through PCA9685 channels |
 | Active buzzer | High-risk, ground-drop, and SOS alert |
 | SOS button | Physical long-press emergency trigger |
 
@@ -72,7 +72,9 @@ Recommended current bench wiring from the Arduino screenshots:
 | Down VL53L1X | TCA `CH5` |
 | MPR121 | TCA `CH7`, address `0x5A` |
 | PCA9685 | root I2C, address `0x40` |
-| PCA9685 CH0/CH1/CH2 | left/right/center motor MOS gate |
+| Left vibration plug | PCA9685 `CH8` |
+| Right vibration plug | PCA9685 `CH9` |
+| Center vibration plug | PCA9685 `CH10` |
 | Buzzer | `GPIO4` |
 | SOS button | `GPIO5`, active low |
 
@@ -159,14 +161,15 @@ Cloud LLM and speech services are optional. Put keys only in `backend/.env`; nev
 
 1. Start the backend.
 2. Flash the Arduino firmware with `SMARTCANE_DEVICE_ID="cane_001"`.
-3. Serial shows four ToF distances and the fused risk state every second.
-4. Put an obstacle in front. The center motor vibrates; high danger beeps.
-5. Leave more space on the left or right. The matching motor suggests the safer bypass direction.
-6. Raise the down-facing sensor or run `mock drop`. The firmware detects a ground-drop risk, vibrates strongly, beeps, and uploads `ground_drop`.
-7. Long-press touch electrode E1 or run `mark`. The backend records `user_mark` at the current route point.
-8. Run `path` to print the local route ring buffer.
-9. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`. The second cane receives historical risk statistics and fuses them into local risk.
-10. Hold the SOS button for 2 seconds or run `sos`. The cane vibrates, beeps, prints SOS, and uploads `sos`.
+3. Run `status` or `read` in Serial Monitor to print one ToF/risk snapshot.
+4. Put an obstacle in front. The firmware prints one risk event, vibrates the center motor, and high danger beeps.
+5. Keep the cane still with the same obstacle. The same place/same risk is not printed, vibrated, or uploaded repeatedly.
+6. Leave more space on the left or right, clear the risk and trigger it again, or move into another location grid. The matching motor suggests the safer bypass direction and a new event can be recorded.
+7. Raise the down-facing sensor or run `mock drop`. The firmware detects a ground-drop risk, vibrates strongly, beeps, and uploads `ground_drop` once for that place.
+8. Long-press touch electrode E1 or run `mark`. The backend records `user_mark` at the current route point.
+9. Run `path` to print the local route/risk ring buffer.
+10. Change `SMARTCANE_DEVICE_ID` to `cane_002`, flash again, and run `nearby`. The second cane receives historical risk statistics and fuses them into local risk.
+11. Hold the SOS button for 2 seconds or run `sos`. The cane vibrates, beeps, prints SOS, and uploads `sos`.
 
 Serial commands are listed in `firmware/smartcane_arduino/README.md`.
 

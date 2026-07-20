@@ -47,6 +47,7 @@ Amap / Gaode:
 | GET | `/api/locations/latest` | latest location for one device |
 | GET | `/api/locations/history` | recent location history for one device |
 | POST | `/api/sensor-frames` | hardware-adapted four-ToF frame upload and feedback analysis |
+| GET | `/api/alerts/latest` | blind/companion urgent alerts, including fall and escalated obstacle alerts |
 | GET | `/api/hardware/profile` | ESP32-C5 wiring, active levels, touch, and motor mapping |
 | GET | `/api/risks/nearby` | nearby collaborative risk summary |
 | GET | `/api/map/status` | Amap key/config status |
@@ -88,7 +89,8 @@ These endpoints read and write the same SQLite tables as `/api/risk-events` and 
 - touch MPR121: TCA `CH7`
 - buzzer: GPIO `4`, low-level trigger
 - SOS button: GPIO `5`, active low, long press
-- vibration motors on blue PCA9685 PWM/Servo Shield: left `CH8`, right `CH9`, center `CH10`, address `0x40`
+- vibration motors: teacher GPIO HIGH/LOW logic, left `GPIO8`, right `GPIO9`, center `GPIO10`
+- built-in BMI270 IMU: fall detection; BMM350 is heading reference only, not GPS/location
 
 Example:
 
@@ -107,6 +109,30 @@ Example:
 ```
 
 Response includes `risk.risk_score`, `risk.voice_prompt`, and `risk.feedback`. The frontend can speak `voice_prompt`; firmware can keep using local buzzer/motor rules offline.
+
+Fall upload example:
+
+```json
+{
+  "device_id": "cane_001",
+  "lat": 31.2304,
+  "lng": 121.4737,
+  "fall_detected": true,
+  "fall_stage": "confirmed",
+  "fall_confidence": 0.92,
+  "accel_total_g": 2.7,
+  "source": "esp32c5"
+}
+```
+
+`fall_detected` is stored as a high-priority event. `/api/alerts/latest?role=blind&deviceId=cane_001` and `/api/alerts/latest?role=companion&deviceId=cane_001` both return it. The response feedback sets all vibration motors to `0` because a fallen user may not be holding the cane.
+
+Companion-only obstacle escalation:
+
+- `prolonged_obstacle`: same obstacle persists for a long time.
+- `approaching_obstacle`: front distance keeps decreasing over the configured window.
+
+Ordinary short obstacle detections remain local/normal risk records and do not page the companion side.
 
 ## Amap Risk-Aware Navigation
 

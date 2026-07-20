@@ -7,6 +7,7 @@
 #include "config.h"
 
 static unsigned long lastWifiRetryMs = 0;
+static unsigned long lastNetworkUnavailableLogMs = 0;
 
 static bool wifiConfigured() {
   String ssid = SMARTCANE_WIFI_SSID;
@@ -21,9 +22,19 @@ static String makeUrl(const char *path) {
   return base + path;
 }
 
+static void printNetworkUnavailable() {
+  unsigned long now = millis();
+  if (lastNetworkUnavailableLogMs != 0 &&
+      now - lastNetworkUnavailableLogMs < SMARTCANE_NETWORK_UNAVAILABLE_LOG_INTERVAL_MS) {
+    return;
+  }
+  lastNetworkUnavailableLogMs = now;
+  Serial.println(F("[NET] network unavailable"));
+}
+
 static bool postJson(const char *path, const String &body, String *responseOut = nullptr) {
   if (!networkAvailable()) {
-    Serial.println(F("[NET] network unavailable"));
+    printNetworkUnavailable();
     return false;
   }
 
@@ -62,7 +73,7 @@ static bool postJson(const char *path, const String &body, String *responseOut =
 
 static bool getJson(const String &url, String &responseOut) {
   if (!networkAvailable()) {
-    Serial.println(F("[NET] network unavailable"));
+    printNetworkUnavailable();
     return false;
   }
 

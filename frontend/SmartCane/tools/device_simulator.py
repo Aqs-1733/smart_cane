@@ -34,11 +34,10 @@ def distances_for_step(step: int) -> tuple[int, int, int, str]:
     return 1500, 1300, 1400, "normal"
 
 
-def build_payload(device_id: str, step: int, battery: int) -> dict[str, object]:
+def build_payload(device_id: str, step: int) -> dict[str, object]:
     front, left, right, scenario = distances_for_step(step)
     return {
         "deviceId": device_id,
-        "battery": battery,
         "frontDistanceMm": front,
         "leftDistanceMm": left,
         "rightDistanceMm": right,
@@ -73,7 +72,6 @@ def main() -> None:
     args = parser.parse_args()
 
     step = 0
-    battery = 90
     print(
         f"Starting simulator: server={args.server} deviceId={args.device_id} interval={args.interval}s"
     )
@@ -81,7 +79,7 @@ def main() -> None:
 
     try:
         while True:
-            payload = build_payload(args.device_id, step, battery)
+            payload = build_payload(args.device_id, step)
             print("\nPOST /telemetry payload:")
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             try:
@@ -93,7 +91,6 @@ def main() -> None:
                 print(f"request failed: {error}")
 
             step += 1
-            battery = max(0, battery - (1 if step % 5 == 0 else 0))
             time.sleep(max(args.interval, 0.1))
     except KeyboardInterrupt:
         print("\nSimulator stopped.")

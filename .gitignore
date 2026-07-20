@@ -30,5 +30,6 @@ __pycache__/
 
 # Local build/config artifacts.
 build/
+build_arduino_check/
 sdkconfig
 sdkconfig.old

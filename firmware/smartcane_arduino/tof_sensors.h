@@ -18,5 +18,6 @@ enum MockScenario {
 bool tofBegin();
 bool tofRead(DistanceReadings &out);
 bool tofMockActive();
+void tofPrintRawReadings();
 void tofSetMockScenario(MockScenario scenario);
 const char *tofMockScenarioName();

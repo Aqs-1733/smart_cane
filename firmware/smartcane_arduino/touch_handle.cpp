@@ -82,6 +82,31 @@ void touchUpdate(TouchEventCallback callback) {
   }
 }
 
+void touchPrintRaw() {
+  if (!capReady || !selectTouchBus()) {
+    Serial.println(F("[TOUCH_RAW] not ready"));
+    return;
+  }
+
+  uint16_t touched = cap.touched();
+  Serial.print(F("[TOUCH_RAW] touched=0b"));
+  for (int8_t i = 11; i >= 0; --i) {
+    Serial.print((touched & (1 << i)) ? '1' : '0');
+  }
+  Serial.println();
+
+  for (uint8_t i = 0; i < 6; ++i) {
+    Serial.print(F("  E"));
+    Serial.print(i);
+    Serial.print(F(" filtered="));
+    Serial.print(cap.filteredData(i));
+    Serial.print(F(" baseline="));
+    Serial.print(cap.baselineData(i));
+    Serial.print(F(" touched="));
+    Serial.println((touched & (1 << i)) ? F("yes") : F("no"));
+  }
+}
+
 const char *touchEventName(TouchEventType type) {
   switch (type) {
     case TOUCH_EVENT_LONG_PRESS:

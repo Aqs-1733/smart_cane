@@ -1,10 +1,12 @@
 #include <Arduino.h>
+#include <math.h>
 
 #include "buttons.h"
 #include "buzzer.h"
 #include "config.h"
 #include "data_model.h"
 #include "i2c_bus.h"
+#include "imu_fall.h"
 #include "network_client.h"
 #include "risk_logic.h"
 #include "tof_sensors.h"
@@ -31,19 +33,39 @@ static DeepRiskResult deepRisk;
 static LocationData location;
 
 static bool networkMode = true;
+static bool streamMode = false;
+static bool rawStreamMode = false;
 static FeedbackCue lastCue = CUE_NONE;
 static unsigned long lastSensorMs = 0;
 static unsigned long lastStatusMs = 0;
 static unsigned long lastFeedbackMs = 0;
 static unsigned long lastLocationUploadMs = 0;
 static unsigned long lastNearbyFetchMs = 0;
-static unsigned long lastAutoUploadMs = 0;
 static unsigned long lastDeepRiskMs = 0;
 static String serialLine;
-
+static RiskState stableRisk;
+static RiskState pendingRisk;
+static bool riskStabilizerReady = false;
+static uint8_t pendingRiskFrames = 0;
+static uint8_t clearRiskFrames = 0;
+static RiskState lastEventRisk;
+static bool haveLastEventRisk = false;
+static long lastEventLatCell = 0;
+static long lastEventLngCell = 0;
+static bool haveLastPathCell = false;
+static long lastPathLatCell = 0;
+static long lastPathLngCell = 0;
+static bool haveLastNearbyCell = false;
+static long lastNearbyLatCell = 0;
+static long lastNearbyLngCell = 0;
 static PathRecord pathBuffer[SMARTCANE_LOCAL_PATH_BUFFER_SIZE];
 static uint8_t pathWriteIndex = 0;
 static uint8_t pathCount = 0;
+static unsigned long lastCompanionAlertMs = 0;
+static unsigned long obstacleStartedMs = 0;
+static const char *obstacleAlertType = "none";
+static unsigned long approachWindowStartMs = 0;
+static int approachStartFrontCm = 0;
 
 #if SMARTCANE_GNSS_ENABLED
 static char gnssLine[128];
@@ -52,10 +74,20 @@ static uint8_t gnssIndex = 0;
 
 static void printHelp();
 static void printStatus();
+static void printVibrationStatus();
+static void printPcaProbe();
 static void repeatLastCue();
 static void handleSos();
+static void handleFallEvent(const ImuFallState &fall);
+static void monitorCompanionAlerts(const RiskState &risk);
+static void uploadCompanionAlert(const char *riskType, RiskLevel level, const char *reason);
+static void handleButtonEvent(ButtonEventType type);
 static void handleTouchEvent(uint8_t electrode, TouchEventType type);
 static void processCommand(String command);
+static void printSensorRiskSnapshot();
+static bool recordPathPointIfMoved(const RiskState &risk);
+static void publishRiskEventIfNeeded(const RiskState &risk);
+static RiskState stabilizeRisk(const RiskState &measuredRisk);
 
 static void initLocation() {
   location.lat = SMARTCANE_MOCK_LAT;
@@ -160,6 +192,105 @@ static void updateGnssLocation() {
 static void updateGnssLocation() {}
 #endif
 
+static long locationToCell(double value) {
+  return (long)floor(value / SMARTCANE_EVENT_LOCATION_CELL_DEG);
+}
+
+static void currentLocationCell(long &latCell, long &lngCell) {
+  if (!location.valid) {
+    latCell = 0;
+    lngCell = 0;
+    return;
+  }
+  latCell = locationToCell(location.lat);
+  lngCell = locationToCell(location.lng);
+}
+
+static bool sameText(const char *a, const char *b) {
+  if (a == nullptr) {
+    a = "";
+  }
+  if (b == nullptr) {
+    b = "";
+  }
+  return strcmp(a, b) == 0;
+}
+
+static bool sameRiskFingerprint(const RiskState &a, const RiskState &b) {
+  return a.level == b.level &&
+         sameText(a.riskType, b.riskType) &&
+         sameText(a.direction, b.direction);
+}
+
+static RiskState stabilizeRisk(const RiskState &measuredRisk) {
+  if (!riskStabilizerReady) {
+    stableRisk = measuredRisk;
+    pendingRisk = measuredRisk;
+    pendingRiskFrames = 1;
+    clearRiskFrames = 0;
+    riskStabilizerReady = true;
+    return stableRisk;
+  }
+
+  if (sameRiskFingerprint(measuredRisk, stableRisk)) {
+    stableRisk = measuredRisk;
+    pendingRiskFrames = 0;
+    clearRiskFrames = 0;
+    return stableRisk;
+  }
+
+  if (measuredRisk.level == RISK_LOW) {
+    pendingRiskFrames = 0;
+    if (stableRisk.level == RISK_LOW) {
+      stableRisk = measuredRisk;
+      clearRiskFrames = 0;
+      return stableRisk;
+    }
+
+    if (clearRiskFrames < 255) {
+      clearRiskFrames++;
+    }
+    if (clearRiskFrames >= SMARTCANE_RISK_CLEAR_FRAMES) {
+      stableRisk = measuredRisk;
+      clearRiskFrames = 0;
+    }
+    return stableRisk;
+  }
+
+  clearRiskFrames = 0;
+  if (!sameRiskFingerprint(measuredRisk, pendingRisk)) {
+    pendingRisk = measuredRisk;
+    pendingRiskFrames = 1;
+  } else if (pendingRiskFrames < 255) {
+    pendingRiskFrames++;
+  }
+
+  if (pendingRiskFrames >= SMARTCANE_RISK_CONFIRM_FRAMES) {
+    stableRisk = measuredRisk;
+    pendingRiskFrames = 0;
+  }
+  return stableRisk;
+}
+
+static bool locationCellChanged(long latCell,
+                                long lngCell,
+                                bool &hasLast,
+                                long &lastLatCell,
+                                long &lastLngCell) {
+  if (!hasLast) {
+    hasLast = true;
+    lastLatCell = latCell;
+    lastLngCell = lngCell;
+    return true;
+  }
+  if (latCell != lastLatCell || lngCell != lastLngCell) {
+    lastLatCell = latCell;
+    lastLngCell = lngCell;
+    return true;
+  }
+  return false;
+}
+
 static void recordPathPoint(const RiskState &risk) {
   PathRecord &record = pathBuffer[pathWriteIndex];
   record.timestampMs = millis();
@@ -173,6 +304,17 @@ static void recordPathPoint(const RiskState &risk) {
   if (pathCount < SMARTCANE_LOCAL_PATH_BUFFER_SIZE) {
     pathCount++;
   }
+}
+
+static bool recordPathPointIfMoved(const RiskState &risk) {
+  long latCell;
+  long lngCell;
+  currentLocationCell(latCell, lngCell);
+  if (!locationCellChanged(latCell, lngCell, haveLastPathCell, lastPathLatCell, lastPathLngCell)) {
+    return false;
+  }
+  recordPathPoint(risk);
+  return true;
 }
 
 static void printPathRecords() {
@@ -246,40 +388,52 @@ static FeedbackCue cueForRisk(const RiskState &risk) {
   if (risk.level == RISK_LOW) {
     return CUE_NONE;
   }
+  if (strcmp(risk.riskType, "fall_detected") == 0) {
+    return CUE_NONE;
+  }
   if (strcmp(risk.riskType, "ground_drop") == 0) {
     return CUE_GROUND_DROP;
+  }
+  if (strcmp(risk.riskType, "down_obstacle") == 0) {
+    return risk.level == RISK_HIGH ? CUE_STOP : CUE_OBSTACLE;
+  }
+  if (strcmp(risk.riskType, "left_obstacle") == 0) {
+    return CUE_TURN_LEFT;
+  }
+  if (strcmp(risk.riskType, "right_obstacle") == 0) {
+    return CUE_TURN_RIGHT;
+  }
+  if (strcmp(risk.riskType, "front_obstacle") == 0) {
+    if (strcmp(risk.direction, "stop") == 0) {
+      return CUE_STOP;
+    }
+    if (strcmp(risk.direction, "turn_left") == 0) {
+      return CUE_FRONT_LEFT;
+    }
+    if (strcmp(risk.direction, "turn_right") == 0) {
+      return CUE_FRONT_RIGHT;
+    }
+    if (risk.level == RISK_HIGH) {
+      return CUE_FRONT_DANGER;
+    }
+    return CUE_OBSTACLE;
   }
   if (strcmp(risk.direction, "stop") == 0) {
     return CUE_STOP;
   }
-  if (strcmp(risk.direction, "turn_left") == 0) {
-    return risk.level == RISK_HIGH ? CUE_FRONT_LEFT : CUE_TURN_LEFT;
-  }
-  if (strcmp(risk.direction, "turn_right") == 0) {
-    return risk.level == RISK_HIGH ? CUE_FRONT_RIGHT : CUE_TURN_RIGHT;
-  }
-  if (strcmp(risk.direction, "keep_left") == 0) {
-    return CUE_TURN_LEFT;
-  }
-  if (strcmp(risk.direction, "keep_right") == 0) {
-    return CUE_TURN_RIGHT;
-  }
-  if (risk.level == RISK_HIGH) {
-    return CUE_FRONT_DANGER;
-  }
   return CUE_OBSTACLE;
 }
 
-static void applyFeedbackForRisk(const RiskState &risk) {
+static void applyFeedbackForRisk(const RiskState &risk, bool force = false, bool allowBuzzer = true) {
   if (risk.level == RISK_LOW) {
     return;
   }
   unsigned long now = millis();
-  if (now - lastFeedbackMs < SMARTCANE_FEEDBACK_REPEAT_MS) {
+  if (!force && now - lastFeedbackMs < SMARTCANE_FEEDBACK_REPEAT_MS) {
     return;
   }
   lastFeedbackMs = now;
-  runCue(cueForRisk(risk), risk.level == RISK_HIGH);
+  runCue(cueForRisk(risk), allowBuzzer && risk.level == RISK_HIGH);
 }
 
 static void repeatLastCue() {
@@ -298,12 +452,7 @@ static void maybeAutoUploadRisk() {
   if (strcmp(currentRisk.riskType, "history_risk") == 0) {
     return;
   }
-  unsigned long now = millis();
-  if (now - lastAutoUploadMs < SMARTCANE_AUTO_UPLOAD_COOLDOWN_MS) {
-    return;
-  }
-  lastAutoUploadMs = now;
-  uploadEvent(currentRisk, distances, location, "source=auto_detected");
+  uploadEvent(currentRisk, distances, location, "source=auto_detected_once_per_place");
 }
 
 static void uploadUserMark(const char *extra) {
@@ -329,6 +478,140 @@ static void handleSos() {
   runCue(CUE_SOS, true);
   recordPathPoint(currentRisk);
   uploadEvent(currentRisk, distances, location, "source=sos_button");
+}
+
+static void handleFallEvent(const ImuFallState &fall) {
+  RiskState fallRisk;
+  fallRisk.level = RISK_HIGH;
+  fallRisk.riskType = "fall_detected";
+  fallRisk.direction = "stop";
+  fallRisk.sensor = "bmi270_imu";
+  fallRisk.reason = fall.reason;
+  fallRisk.confidence = fall.confidence;
+  fallRisk.detectedAtMs = millis();
+  currentRisk = fallRisk;
+
+  Serial.println(F("[FALL] detected by BMI270; buzzer only, no vibration"));
+  imuFallPrintStatus();
+  beepPatternSos();
+  recordPathPoint(fallRisk);
+
+  String extra = String("{\"source\":\"bmi270_imu\",\"notify\":\"blind_and_companion\",\"fall_stage\":\"") +
+                 fall.stage + "\",\"total_g\":" + String(fall.totalG, 2) +
+                 ",\"pitch_deg\":" + String(fall.pitchDeg, 1) +
+                 ",\"roll_deg\":" + String(fall.rollDeg, 1) + "}";
+  uploadRiskEvent("fall_detected",
+                  "high",
+                  "stop",
+                  "bmi270_imu",
+                  -1,
+                  distances,
+                  location,
+                  extra.c_str());
+}
+
+static void uploadCompanionAlert(const char *riskType, RiskLevel level, const char *reason) {
+  unsigned long now = millis();
+  if (lastCompanionAlertMs != 0 &&
+      now - lastCompanionAlertMs < SMARTCANE_COMPANION_ALERT_COOLDOWN_MS) {
+    return;
+  }
+  lastCompanionAlertMs = now;
+
+  Serial.print(F("[ALERT] companion "));
+  Serial.print(riskType);
+  Serial.print(F(" level="));
+  Serial.print(riskLevelToString(level));
+  Serial.print(F(" reason="));
+  Serial.println(reason);
+
+  String extra = String("{\"source\":\"tof_trend\",\"notify\":\"companion\",\"reason\":\"") +
+                 reason + "\",\"front_cm\":" + String(distances.frontCm) +
+                 ",\"left_cm\":" + String(distances.leftCm) +
+                 ",\"right_cm\":" + String(distances.rightCm) +
+                 ",\"down_cm\":" + String(distances.downCm) + "}";
+  uploadRiskEvent(riskType,
+                  riskLevelToString(level),
+                  currentRisk.direction,
+                  "tof_trend",
+                  currentRisk.distanceMm,
+                  distances,
+                  location,
+                  extra.c_str());
+}
+
+static bool isObstacleRisk(const RiskState &risk) {
+  return strcmp(risk.riskType, "front_obstacle") == 0 ||
+         strcmp(risk.riskType, "left_obstacle") == 0 ||
+         strcmp(risk.riskType, "right_obstacle") == 0 ||
+         strcmp(risk.riskType, "down_obstacle") == 0;
+}
+
+static void monitorCompanionAlerts(const RiskState &risk) {
+  unsigned long now = millis();
+
+  if (risk.level != RISK_LOW && isObstacleRisk(risk)) {
+    if (strcmp(obstacleAlertType, risk.riskType) != 0) {
+      obstacleAlertType = risk.riskType;
+      obstacleStartedMs = now;
+    } else if (obstacleStartedMs != 0 &&
+               now - obstacleStartedMs >= SMARTCANE_COMPANION_OBSTACLE_HOLD_MS) {
+      uploadCompanionAlert("prolonged_obstacle", RISK_HIGH, "same_obstacle_persisted");
+      obstacleStartedMs = now;
+    }
+  } else {
+    obstacleStartedMs = 0;
+    obstacleAlertType = "none";
+  }
+
+  if (!distances.frontValid || distances.frontCm >= SMARTCANE_FRONT_WARN_CM) {
+    approachWindowStartMs = 0;
+    approachStartFrontCm = 0;
+    return;
+  }
+
+  if (approachWindowStartMs == 0) {
+    approachWindowStartMs = now;
+    approachStartFrontCm = distances.frontCm;
+    return;
+  }
+
+  if (now - approachWindowStartMs >= SMARTCANE_COMPANION_APPROACH_WINDOW_MS) {
+    int dropCm = approachStartFrontCm - distances.frontCm;
+    if (dropCm >= SMARTCANE_COMPANION_APPROACH_DELTA_CM) {
+      uploadCompanionAlert("approaching_obstacle",
+                           distances.frontCm < SMARTCANE_FRONT_DANGER_CM ? RISK_HIGH : RISK_MEDIUM,
+                           "front_distance_decreasing");
+    }
+    approachWindowStartMs = now;
+    approachStartFrontCm = distances.frontCm;
+  }
+}
+
+static void handleButtonEvent(ButtonEventType type) {
+  Serial.print(F("[BUTTON_EVT] "));
+  Serial.println(buttonEventName(type));
+
+  if (type == BUTTON_EVENT_LONG_PRESS) {
+    handleSos();
+    return;
+  }
+
+  if (type == BUTTON_EVENT_DOUBLE_CLICK) {
+    uploadUserMark("source=button_double_click");
+    vibrateCenter(SMARTCANE_VIB_LEVEL_MEDIUM, 160);
+    return;
+  }
+
+  tofRead(distances);
+  currentRisk = stabilizeRisk(calculateRisk(distances, nearby));
+  printSensorRiskSnapshot();
+  if (currentRisk.level != RISK_LOW) {
+    applyFeedbackForRisk(currentRisk, true);
+  } else {
+    Serial.println(F("[BUTTON] clear road"));
+    beep(40);
+  }
 }
 
 static void handleTouchEvent(uint8_t electrode, TouchEventType type) {
@@ -394,8 +677,62 @@ static void printDistances() {
   Serial.println(distances.downValid ? F("cm") : F("cm?"));
 }
 
+static void printSensorRiskSnapshot() {
+  Serial.print(F("[SENSOR] "));
+  printDistances();
+  Serial.print(F("[RISK] "));
+  printRiskState(currentRisk);
+}
+
+static void publishRiskEventIfNeeded(const RiskState &risk) {
+  long latCell;
+  long lngCell;
+  currentLocationCell(latCell, lngCell);
+
+  bool shouldPublish = false;
+  if (!haveLastEventRisk) {
+    shouldPublish = risk.level != RISK_LOW;
+  } else if (risk.level == RISK_LOW) {
+    shouldPublish = lastEventRisk.level != RISK_LOW;
+  } else {
+    bool samePlace = latCell == lastEventLatCell && lngCell == lastEventLngCell;
+    shouldPublish = lastEventRisk.level == RISK_LOW ||
+                    !samePlace ||
+                    !sameRiskFingerprint(risk, lastEventRisk);
+  }
+
+  if (!shouldPublish) {
+    return;
+  }
+
+  Serial.print(risk.level == RISK_MEDIUM ? F("[HINT] ") : F("[EVENT] "));
+  Serial.println(risk.level == RISK_LOW ? F("risk cleared") :
+                 (risk.level == RISK_MEDIUM ? F("caution hint once") : F("risk detected once")));
+  printSensorRiskSnapshot();
+
+  if (risk.level != RISK_LOW) {
+    applyFeedbackForRisk(risk, true);
+  }
+
+  if (risk.level == RISK_HIGH) {
+    recordPathPoint(risk);
+    maybeAutoUploadRisk();
+    if (networkMode && networkAvailable()) {
+      lastDeepRiskMs = millis();
+      fetchDeepRisk(risk, distances, location, deepRisk);
+    }
+  }
+
+  lastEventRisk = risk;
+  lastEventLatCell = latCell;
+  lastEventLngCell = lngCell;
+  haveLastEventRisk = true;
+}
+
 static void printStatus() {
   Serial.println(F("----- SMARTCANE STATUS -----"));
+  Serial.print(F("build="));
+  Serial.println(F(SMARTCANE_BUILD_TAG));
   Serial.print(F("device="));
   Serial.print(SMARTCANE_DEVICE_ID);
   Serial.print(F(" mode="));
@@ -403,7 +740,11 @@ static void printStatus() {
   Serial.print(F(" wifi="));
   Serial.print(networkAvailable() ? F("ok") : F("off"));
   Serial.print(F(" tof="));
-  Serial.println(tofMockActive() ? F("mock") : F("real"));
+  Serial.print(tofMockActive() ? F("mock") : F("real"));
+  Serial.print(F(" vib="));
+  Serial.print(vibrationModeName());
+  Serial.print(F(" buzzer="));
+  Serial.println(buzzerIsEnabled() ? F("on") : F("off"));
   printDistances();
   printRiskState(currentRisk);
   Serial.print(F("location lat="));
@@ -416,6 +757,29 @@ static void printStatus() {
   Serial.println(location.quality);
   printNearbySummary(nearby);
   printDeepRisk(deepRisk);
+  imuFallPrintStatus();
+}
+
+static void printVibrationStatus() {
+  Serial.print(F("[VIB] build="));
+  Serial.print(F(SMARTCANE_BUILD_TAG));
+  Serial.print(F(" mode="));
+  Serial.print(vibrationModeName());
+  Serial.print(F(" pins L/R/C="));
+  Serial.print(SMARTCANE_VIB_LEFT_PIN);
+  Serial.print(F("/"));
+  Serial.print(SMARTCANE_VIB_RIGHT_PIN);
+  Serial.print(F("/"));
+  Serial.println(SMARTCANE_VIB_CENTER_PIN);
+}
+
+static void printPcaProbe() {
+  Serial.print(F("[PCA] addr=0x"));
+  Serial.print(SMARTCANE_PCA9685_ADDR, HEX);
+  Serial.print(F(" i2c_clock="));
+  Serial.print(SMARTCANE_I2C_CLOCK_HZ);
+  Serial.print(F(" result="));
+  Serial.println(i2cProbe(SMARTCANE_PCA9685_ADDR) ? F("found") : F("not_found"));
 }
 
 static MockScenario parseMockScenario(const String &name) {
@@ -440,9 +804,71 @@ static void processCommand(String command) {
     printHelp();
   } else if (command == "status") {
     printStatus();
+  } else if (command == "read") {
+    tofRead(distances);
+    currentRisk = stabilizeRisk(calculateRisk(distances, nearby));
+    printSensorRiskSnapshot();
+  } else if (command == "raw" || command == "tofraw") {
+    tofPrintRawReadings();
   } else if (command == "scan") {
     i2cScanRoot();
     i2cScanTcaChannels();
+  } else if (command == "pca" || command == "pca9685") {
+    printPcaProbe();
+  } else if (command == "touchraw") {
+    touchPrintRaw();
+  } else if (command == "imu") {
+    imuFallPrintStatus();
+  } else if (command == "imuraw") {
+    imuFallPrintRaw();
+  } else if (command == "fall") {
+    Serial.println(F("[TEST] mock fall event"));
+    imuFallMockTrigger();
+  } else if (command == "fallclear") {
+    Serial.println(F("[TEST] fall state clear"));
+    imuFallClear();
+  } else if (command == "vib" || command == "vibration" || command == "motor" || command == "vib status") {
+    printVibrationStatus();
+  } else if (command == "vib left" || command == "motor 1" || command == "m1") {
+    Serial.println(F("[TEST] vibrate left"));
+    vibrateLeft(SMARTCANE_VIB_LEVEL_HIGH, 500);
+  } else if (command == "vib right" || command == "motor 2" || command == "m2") {
+    Serial.println(F("[TEST] vibrate right"));
+    vibrateRight(SMARTCANE_VIB_LEVEL_HIGH, 500);
+  } else if (command == "vib center" || command == "vib centre" || command == "motor 3" || command == "m3") {
+    Serial.println(F("[TEST] vibrate center"));
+    vibrateCenter(SMARTCANE_VIB_LEVEL_HIGH, 500);
+  } else if (command == "vib all" || command == "motor all" || command == "mall") {
+    Serial.println(F("[TEST] vibrate all"));
+    vibrateAll(SMARTCANE_VIB_LEVEL_HIGH, 500);
+  } else if (command == "vib stop" || command == "motor stop" || command == "mstop") {
+    Serial.println(F("[TEST] vibration stop"));
+    vibrationStopAll();
+  } else if (command == "beep") {
+    Serial.println(F("[TEST] beep short"));
+    beep(160);
+  } else if (command == "beep danger") {
+    Serial.println(F("[TEST] beep danger"));
+    beepPatternDanger();
+  } else if (command == "beep sos") {
+    Serial.println(F("[TEST] beep sos"));
+    beepPatternSos();
+  } else if (command == "buzzer on") {
+    buzzerSetEnabled(true);
+  } else if (command == "buzzer off") {
+    buzzerSetEnabled(false);
+  } else if (command == "stream" || command == "stream on") {
+    streamMode = true;
+    rawStreamMode = false;
+    Serial.println(F("[STREAM] on"));
+  } else if (command == "stream raw" || command == "rawstream") {
+    streamMode = false;
+    rawStreamMode = true;
+    Serial.println(F("[STREAM] raw on"));
+  } else if (command == "stream off") {
+    streamMode = false;
+    rawStreamMode = false;
+    Serial.println(F("[STREAM] off"));
   } else if (command == "nearby") {
     fetchNearbyRisks(location.lat, location.lng, nearby);
     printNearbySummary(nearby);
@@ -453,6 +879,12 @@ static void processCommand(String command) {
     uploadUserMark("source=serial_command");
   } else if (command == "sos") {
     handleSos();
+  } else if (command == "btn" || command == "button") {
+    handleButtonEvent(BUTTON_EVENT_CLICK);
+  } else if (command == "btndouble" || command == "button double") {
+    handleButtonEvent(BUTTON_EVENT_DOUBLE_CLICK);
+  } else if (command == "btnlong" || command == "button long") {
+    handleButtonEvent(BUTTON_EVENT_LONG_PRESS);
   } else if (command == "mode") {
     networkMode = !networkMode;
     Serial.print(F("[MODE] "));
@@ -491,12 +923,23 @@ static void handleSerialInput() {
 static void printHelp() {
   Serial.println(F("[HELP] commands:"));
   Serial.println(F("  status        print sensor, risk, location, nearby history"));
+  Serial.println(F("  read          print one sensor/risk snapshot"));
+  Serial.println(F("  raw           print raw VL53L1X millimeter readings"));
+  Serial.println(F("  stream on/off print live sensor snapshots for bench testing"));
+  Serial.println(F("  stream raw    print live raw VL53L1X millimeter readings"));
   Serial.println(F("  scan          scan root I2C and TCA channels"));
+  Serial.println(F("  touchraw      print MPR121 touched/filter/baseline values"));
+  Serial.println(F("  imu|imuraw    print BMI270 fall detector status/raw accel"));
+  Serial.println(F("  fall|fallclear simulate/clear fall emergency alert"));
+  Serial.println(F("  vib left|right|center|all|stop|status"));
+  Serial.println(F("  m1|m2|m3|mall|mstop test teacher GPIO ON/OFF on pins 8/9/10"));
+  Serial.println(F("  beep|beep danger|beep sos|buzzer on|buzzer off"));
   Serial.println(F("  mock auto|clear|warn|danger|drop|blocked|left|right"));
   Serial.println(F("  nearby        fetch /api/risks/nearby"));
   Serial.println(F("  deep          call backend /api/ai/deep-risk"));
   Serial.println(F("  mark          upload user_mark risk event"));
   Serial.println(F("  sos           simulate SOS long press"));
+  Serial.println(F("  btn|btndouble|btnlong simulate physical button"));
   Serial.println(F("  mode          toggle local/network mode"));
   Serial.println(F("  path          print local route ring buffer"));
   Serial.println(F("  t0 t1long t2 t3 t4 t5 simulate touch events"));
@@ -504,18 +947,32 @@ static void printHelp() {
 
 void setup() {
   Serial.begin(115200);
-  delay(250);
+  unsigned long serialWaitStartMs = millis();
+  while (!Serial && millis() - serialWaitStartMs < 2000) {
+    delay(10);
+  }
   Serial.println();
   Serial.println(F("ESP32-C5 Smart Cane Arduino START"));
+  Serial.print(F("Build: "));
+  Serial.println(F(SMARTCANE_BUILD_TAG));
   Serial.println(F("Board: ESP32C5 Dev Module, baud: 115200"));
+  Serial.flush();
 
   initLocation();
-  i2cBusBegin();
-  tofBegin();
-  touchBegin();
-  vibrationBegin();
   buzzerBegin();
+  Serial.flush();
+  i2cBusBegin();
+  Serial.flush();
+  tofBegin();
+  Serial.flush();
+  imuFallBegin();
+  Serial.flush();
+  touchBegin();
+  Serial.flush();
+  vibrationBegin();
+  Serial.flush();
   buttonsBegin();
+  Serial.flush();
 
 #if SMARTCANE_GNSS_ENABLED
   Serial1.begin(SMARTCANE_GNSS_BAUD, SERIAL_8N1, SMARTCANE_GNSS_RX_PIN, SMARTCANE_GNSS_TX_PIN);
@@ -528,13 +985,16 @@ void setup() {
   if (networkMode && networkAvailable()) {
     uploadLocation(location);
     fetchNearbyRisks(location.lat, location.lng, nearby);
+    currentLocationCell(lastNearbyLatCell, lastNearbyLngCell);
+    haveLastNearbyCell = true;
   }
 
   tofRead(distances);
-  currentRisk = calculateRisk(distances, nearby);
-  recordPathPoint(currentRisk);
+  currentRisk = stabilizeRisk(calculateRisk(distances, nearby));
+  recordPathPointIfMoved(currentRisk);
   printHelp();
   printStatus();
+  publishRiskEventIfNeeded(currentRisk);
 }
 
 void loop() {
@@ -542,20 +1002,27 @@ void loop() {
 
   buzzerUpdate();
   vibrationUpdate();
-  buttonsUpdate(handleSos);
+  buttonsUpdate(handleButtonEvent);
   touchUpdate(handleTouchEvent);
   handleSerialInput();
+  imuFallUpdate();
+  ImuFallState fall;
+  if (imuFallConsumeEvent(fall)) {
+    handleFallEvent(fall);
+  }
   updateGnssLocation();
   networkClientUpdate();
 
   if (now - lastSensorMs >= SMARTCANE_SENSOR_INTERVAL_MS) {
     lastSensorMs = now;
     tofRead(distances);
-    currentRisk = calculateRisk(distances, nearby);
-    applyFeedbackForRisk(currentRisk);
-    maybeAutoUploadRisk();
+    currentRisk = stabilizeRisk(calculateRisk(distances, nearby));
+    publishRiskEventIfNeeded(currentRisk);
+    monitorCompanionAlerts(currentRisk);
+    applyFeedbackForRisk(currentRisk, false, false);
   }
 
+#if SMARTCANE_PERIODIC_SERIAL_STATUS_ENABLED
   if (now - lastStatusMs >= SMARTCANE_STATUS_INTERVAL_MS) {
     lastStatusMs = now;
     Serial.print(F("[SENSOR] "));
@@ -563,25 +1030,42 @@ void loop() {
     Serial.print(F("[RISK] "));
     printRiskState(currentRisk);
   }
+#endif
+
+  if (streamMode && now - lastStatusMs >= SMARTCANE_STREAM_INTERVAL_MS) {
+    lastStatusMs = now;
+    printSensorRiskSnapshot();
+  }
+
+  if (rawStreamMode && now - lastStatusMs >= SMARTCANE_STREAM_INTERVAL_MS) {
+    lastStatusMs = now;
+    tofPrintRawReadings();
+  }
 
   if (now - lastLocationUploadMs >= SMARTCANE_LOCATION_UPLOAD_INTERVAL_MS) {
     lastLocationUploadMs = now;
     updateMockRoute();
-    recordPathPoint(currentRisk);
-    if (networkMode) {
+    bool moved = recordPathPointIfMoved(currentRisk);
+    if (networkMode && networkAvailable() && moved) {
       uploadLocation(location);
     }
   }
 
-  if (networkMode && now - lastNearbyFetchMs >= SMARTCANE_NEARBY_FETCH_INTERVAL_MS) {
+  if (networkMode && networkAvailable() && now - lastNearbyFetchMs >= SMARTCANE_NEARBY_FETCH_INTERVAL_MS) {
     lastNearbyFetchMs = now;
-    fetchNearbyRisks(location.lat, location.lng, nearby);
-  }
-
-  if (networkMode && now - lastDeepRiskMs >= SMARTCANE_DEEP_RISK_INTERVAL_MS) {
-    lastDeepRiskMs = now;
-    if (currentRisk.level != RISK_LOW || (nearby.available && nearby.riskCount > 0)) {
-      fetchDeepRisk(currentRisk, distances, location, deepRisk);
+    long latCell;
+    long lngCell;
+    currentLocationCell(latCell, lngCell);
+    if (locationCellChanged(latCell,
+                            lngCell,
+                            haveLastNearbyCell,
+                            lastNearbyLatCell,
+                            lastNearbyLngCell)) {
+      fetchNearbyRisks(location.lat, location.lng, nearby);
     }
   }
+
+  // Deep-risk analysis is intentionally event-triggered in
+  // publishRiskEventIfNeeded(), so standing still in the same risk area does
+  // not keep calling the backend/LLM.
 }

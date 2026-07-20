@@ -1,4 +1,4 @@
-package com.nankai.smartcane.ui.theme
+﻿package com.nankai.smartcane.ui.theme
 
 import androidx.compose.ui.graphics.Color
 

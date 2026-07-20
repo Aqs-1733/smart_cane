@@ -10,6 +10,7 @@ static uint8_t patternRemaining = 0;
 static uint16_t patternOnMs = 0;
 static uint16_t patternOffMs = 0;
 static unsigned long patternNextMs = 0;
+static bool buzzerEnabled = SMARTCANE_BUZZER_ENABLED;
 
 static uint8_t activeLevel() {
   return SMARTCANE_BUZZER_ACTIVE_HIGH ? HIGH : LOW;
@@ -24,16 +25,40 @@ void buzzerBegin() {
   pinMode(SMARTCANE_BUZZER_PIN, OUTPUT);
   digitalWrite(SMARTCANE_BUZZER_PIN, idleLevel());
   Serial.print(F("[BUZZER] GPIO "));
-  Serial.println(SMARTCANE_BUZZER_PIN);
+  Serial.print(SMARTCANE_BUZZER_PIN);
+  Serial.println(buzzerEnabled ? F(" enabled") : F(" muted"));
+}
+
+void buzzerSetEnabled(bool enabled) {
+  buzzerEnabled = enabled;
+  if (!buzzerEnabled) {
+    singleBeepActive = false;
+    patternActive = false;
+    digitalWrite(SMARTCANE_BUZZER_PIN, idleLevel());
+  }
+  Serial.print(F("[BUZZER] "));
+  Serial.println(buzzerEnabled ? F("on") : F("off"));
+}
+
+bool buzzerIsEnabled() {
+  return buzzerEnabled;
 }
 
 void beep(uint16_t ms) {
+  if (!buzzerEnabled) {
+    digitalWrite(SMARTCANE_BUZZER_PIN, idleLevel());
+    return;
+  }
   digitalWrite(SMARTCANE_BUZZER_PIN, activeLevel());
   singleBeepActive = true;
   singleBeepUntilMs = millis() + ms;
 }
 
 static void startPattern(uint8_t repeats, uint16_t onMs, uint16_t offMs) {
+  if (!buzzerEnabled) {
+    digitalWrite(SMARTCANE_BUZZER_PIN, idleLevel());
+    return;
+  }
   patternActive = true;
   patternOn = true;
   patternRemaining = repeats;

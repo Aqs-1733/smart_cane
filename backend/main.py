@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "smartcane.db"
+DB_PATH = Path(os.getenv("SMARTCANE_DB_PATH", str(BASE_DIR / "smartcane.db")))
 LEVEL_RANK = {"low": 0, "medium": 1, "high": 2}
 DEVICE_OFFLINE_SECONDS = 60
 AMAP_BASE_URL = "https://restapi.amap.com/v3"
@@ -64,12 +64,16 @@ HARDWARE_PROFILE: dict[str, Any] = {
         "buzzer": {"gpio": 4, "active_level": "LOW", "idle_level": "HIGH"},
         "sos_button": {"gpio": 5, "active_level": "LOW", "hold_ms": 2000},
         "vibration_motors": {
-            "mode": "pca9685_pwm",
-            "addr": "0x40",
-            "left": {"channel": 8},
-            "right": {"channel": 9},
-            "center": {"channel": 10},
+            "mode": "teacher_gpio_onoff",
+            "left": {"gpio": 8},
+            "right": {"gpio": 9},
+            "center": {"gpio": 10},
         },
+    },
+    "built_in_sensors": {
+        "imu": {"sensor": "BMI270", "use": "fall_detected"},
+        "magnetometer": {"sensor": "BMM350", "use": "heading_reference_not_position"},
+        "location": {"source": "phone_amap_or_mock", "note": "ESP32-C5 board has no GPS receiver"},
     },
     "thresholds_cm": {
         "front_warn": FRONT_WARN_CM,
@@ -176,6 +180,14 @@ class SensorFrameCreate(BaseModel):
     down_cm: Optional[int] = Field(None, ge=0, le=450)
     battery: Optional[float] = Field(None, ge=-1, le=100)
     heading_deg: Optional[float] = Field(None, ge=0, lt=360)
+    accel_x_g: Optional[float] = None
+    accel_y_g: Optional[float] = None
+    accel_z_g: Optional[float] = None
+    accel_total_g: Optional[float] = None
+    fall_detected: Optional[bool] = None
+    fall_stage: Optional[str] = None
+    fall_confidence: Optional[float] = Field(None, ge=0, le=1)
+    alert_type: Optional[str] = None
     location_quality: Optional[str] = None
     location_provider: Optional[str] = None
     source: str = "esp32c5"
@@ -493,6 +505,12 @@ def legacy_event_message(item: dict[str, Any]) -> str:
     cm_text = f"{int(round(distance / 10))} \u5398\u7c73" if distance is not None else "\u672a\u77e5\u8ddd\u79bb"
     if risk_type == "sos":
         return "\u6536\u5230 Android App \u7d27\u6025\u6c42\u52a9\uff0c\u8bf7\u5c3d\u5feb\u8054\u7cfb\u4f7f\u7528\u8005\u3002"
+    if risk_type == "fall_detected":
+        return "\u68c0\u6d4b\u5230\u7591\u4f3c\u8dcc\u5012\uff0c\u5df2\u5411\u76f2\u4eba\u7aef\u548c\u966a\u62a4\u7aef\u53d1\u9001\u7d27\u6025\u544a\u8b66\u3002"
+    if risk_type == "prolonged_obstacle":
+        return "\u540c\u4e00\u969c\u788d\u6301\u7eed\u51fa\u73b0\uff0c\u5efa\u8bae\u966a\u62a4\u8005\u5173\u6ce8\u4f7f\u7528\u8005\u4f4d\u7f6e\u548c\u72b6\u6001\u3002"
+    if risk_type == "approaching_obstacle":
+        return "\u524d\u65b9\u969c\u788d\u8ddd\u79bb\u6b63\u5728\u6301\u7eed\u7f29\u77ed\uff0c\u5efa\u8bae\u51cf\u901f\u6216\u505c\u6b62\u786e\u8ba4\u3002"
     if risk_type == "ground_drop":
         return f"\u4e0b\u89c6\u8ddd\u79bb\u7ea6 {cm_text}\uff0c\u53ef\u80fd\u6709\u53f0\u9636\u3001\u5751\u6d3c\u6216\u843d\u5dee\uff0c\u8bf7\u505c\u6b62\u524d\u8fdb\u3002"
     if risk_type == "front_obstacle":
@@ -529,6 +547,65 @@ def legacy_event_dict(row: sqlite3.Row) -> dict[str, Any]:
         "latitude": item.get("lat"),
         "longitude": item.get("lng"),
         "timestamp": item.get("timestamp"),
+    }
+
+
+ALERT_RISK_TYPES = {"sos", "fall_detected", "prolonged_obstacle", "approaching_obstacle"}
+
+
+def alert_title(risk_type: str) -> str:
+    return {
+        "sos": "SOS 紧急求助",
+        "fall_detected": "疑似跌倒告警",
+        "prolonged_obstacle": "持续障碍提醒",
+        "approaching_obstacle": "障碍逼近提醒",
+    }.get(risk_type, "风险告警")
+
+
+def alert_priority(risk_type: str, level: str) -> str:
+    if risk_type in {"sos", "fall_detected"}:
+        return "critical"
+    if risk_type == "prolonged_obstacle" or level == "high":
+        return "high"
+    return "medium"
+
+
+def allowed_alert_devices(role: str, user_id: Optional[str], device_id: Optional[str]) -> Optional[set[str]]:
+    if device_id:
+        return {device_id}
+    if not user_id:
+        return None
+    field = "companion_user_id" if role == "companion" else "blind_user_id"
+    with db() as conn:
+        rows = conn.execute(
+            f"SELECT device_id FROM care_relations WHERE {field} = ? AND status = 'active'",
+            (user_id,),
+        ).fetchall()
+    devices = {str(row["device_id"]) for row in rows}
+    return devices or {"cane_001"}
+
+
+def alert_event_payload(row: sqlite3.Row, role: str) -> dict[str, Any]:
+    event = legacy_event_dict(row)
+    risk_type = event["riskType"]
+    level = event["riskLevel"]
+    return {
+        "id": event["id"],
+        "deviceId": event["deviceId"],
+        "riskType": risk_type,
+        "riskLevel": level,
+        "priority": alert_priority(risk_type, level),
+        "title": alert_title(risk_type),
+        "message": event["message"],
+        "voicePrompt": event["voicePrompt"],
+        "latitude": event["latitude"],
+        "longitude": event["longitude"],
+        "timestamp": event["timestamp"],
+        "targetRoles": ["blind", "companion"] if risk_type in {"sos", "fall_detected"} else ["companion"],
+        "forRole": role,
+        "requiresAttention": True,
+        "feedback": event.get("feedback"),
+        "riskScore": event.get("riskScore"),
     }
 
 
@@ -728,6 +805,8 @@ def primary_distance_mm(risk_type: str, frame: SensorFrameCreate) -> Optional[in
         return frame.right_cm * 10
     if risk_type in {"ground_drop", "down_obstacle", "fall_detected"} and frame.down_cm is not None:
         return frame.down_cm * 10
+    if risk_type in {"prolonged_obstacle", "approaching_obstacle"} and frame.front_cm is not None:
+        return frame.front_cm * 10
     return None
 
 
@@ -775,6 +854,10 @@ def history_score(history: dict[str, Any]) -> float:
 def choose_direction(frame: SensorFrameCreate, risk_type: str, level: str) -> str:
     if risk_type in {"ground_drop", "fall_detected", "sos"}:
         return "stop"
+    if risk_type == "prolonged_obstacle":
+        return "stop"
+    if risk_type == "approaching_obstacle":
+        return "slow" if level == "medium" else "stop"
     if risk_type == "down_obstacle":
         return "slow"
     if risk_type == "left_obstacle":
@@ -796,6 +879,22 @@ def choose_direction(frame: SensorFrameCreate, risk_type: str, level: str) -> st
     return "none"
 
 
+def imu_fall_score(frame: SensorFrameCreate) -> float:
+    if frame.fall_detected is True or frame.manual_risk_type == "fall_detected":
+        return 100.0
+    if frame.fall_confidence is not None and frame.fall_confidence >= 0.80:
+        return 92.0
+    if frame.fall_stage in {"confirmed", "mock_confirmed"}:
+        return 92.0
+    if frame.accel_total_g is None:
+        return 0.0
+    if frame.accel_total_g >= 2.6:
+        return 72.0
+    if frame.accel_total_g <= 0.30:
+        return 58.0
+    return 0.0
+
+
 def feedback_for_risk(risk_type: str, level: str, direction: str) -> dict[str, Any]:
     if risk_type == "sos":
         return {
@@ -806,8 +905,20 @@ def feedback_for_risk(risk_type: str, level: str, direction: str) -> dict[str, A
     if risk_type == "fall_detected":
         return {
             "buzzer": {"enabled": True, "beeps": 4, "pattern": "fall_or_urgent"},
-            "vibration": {"left": 100, "right": 100, "center": 100, "duration_ms": 900},
+            "vibration": {"left": 0, "right": 0, "center": 0, "duration_ms": 0},
             "action": "stop_and_confirm",
+        }
+    if risk_type == "prolonged_obstacle":
+        return {
+            "buzzer": {"enabled": True, "beeps": 2, "pattern": "companion_attention"},
+            "vibration": {"left": 0, "right": 0, "center": 60, "duration_ms": 300},
+            "action": "notify_companion",
+        }
+    if risk_type == "approaching_obstacle":
+        return {
+            "buzzer": {"enabled": level == "high", "beeps": 2, "pattern": "approaching_obstacle"},
+            "vibration": {"left": 0, "right": 0, "center": 80 if level == "high" else 45, "duration_ms": 350},
+            "action": "slow_or_stop",
         }
     if risk_type == "ground_drop":
         return {
@@ -857,7 +968,11 @@ def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, 
     if risk_type == "sos":
         return "SOS 已发送，请停在安全位置等待联系。"
     if risk_type == "fall_detected":
-        return "检测到跌倒上报，请保持不动并确认安全。"
+        return "检测到疑似跌倒，已发送紧急告警，请保持不动并等待确认。"
+    if risk_type == "prolonged_obstacle":
+        return "同一障碍持续出现，已通知陪护端，请停止并重新探测前方。"
+    if risk_type == "approaching_obstacle":
+        return "障碍距离正在缩短，请立即减速，必要时停止前进。"
     if risk_type == "ground_drop":
         return f"下方距离约 {frame.down_cm or '-'} 厘米，可能有台阶或坑洼，请停止。"
     if risk_type == "front_obstacle":
@@ -881,9 +996,15 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
     if frame.button_event in {"long_press", "sos"}:
         risk_type = "sos"
         score = 100.0
-    elif frame.manual_risk_type == "fall_detected":
+    elif frame.manual_risk_type in {"fall_detected", "prolonged_obstacle", "approaching_obstacle"}:
+        risk_type = frame.manual_risk_type
+        score = 100.0 if risk_type == "fall_detected" else (88.0 if risk_type == "prolonged_obstacle" else 76.0)
+    elif frame.alert_type in {"fall_detected", "prolonged_obstacle", "approaching_obstacle"}:
+        risk_type = frame.alert_type
+        score = 100.0 if risk_type == "fall_detected" else (88.0 if risk_type == "prolonged_obstacle" else 76.0)
+    elif imu_fall_score(frame) > 0:
         risk_type = "fall_detected"
-        score = 100.0
+        score = imu_fall_score(frame)
     elif frame.touch_electrode == 1 and frame.touch_event == "long_press":
         risk_type = "user_mark"
         score = max(45.0, history_score(history))
@@ -917,7 +1038,9 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
             "ground_drop": "tof_down",
             "user_mark": "touch",
             "sos": "sos_button",
-            "fall_detected": "phone_or_manual",
+            "fall_detected": "bmi270_imu",
+            "prolonged_obstacle": "tof_trend",
+            "approaching_obstacle": "tof_trend",
             "history_risk": "backend_history",
         }.get(risk_type, "none"),
         "distance_mm": primary_distance_mm(risk_type, frame),
@@ -933,7 +1056,17 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
 
 
 def should_store_sensor_analysis(analysis: dict[str, Any]) -> bool:
-    return analysis["risk_type"] in {"front_obstacle", "left_obstacle", "right_obstacle", "ground_drop", "user_mark", "sos", "fall_detected"} and analysis["risk_level"] in {"medium", "high"}
+    return analysis["risk_type"] in {
+        "front_obstacle",
+        "left_obstacle",
+        "right_obstacle",
+        "ground_drop",
+        "user_mark",
+        "sos",
+        "fall_detected",
+        "prolonged_obstacle",
+        "approaching_obstacle",
+    } and analysis["risk_level"] in {"medium", "high"}
 
 
 def amap_key() -> str:
@@ -1623,6 +1756,14 @@ def create_sensor_frame(frame: SensorFrameCreate) -> dict[str, Any]:
                     "button_event": frame.button_event,
                     "touch_electrode": frame.touch_electrode,
                     "touch_event": frame.touch_event,
+                    "alert_type": frame.alert_type,
+                    "fall_detected": frame.fall_detected,
+                    "fall_stage": frame.fall_stage,
+                    "fall_confidence": frame.fall_confidence,
+                    "accel_x_g": frame.accel_x_g,
+                    "accel_y_g": frame.accel_y_g,
+                    "accel_z_g": frame.accel_z_g,
+                    "accel_total_g": frame.accel_total_g,
                     "hardware_profile": "esp32c5_tca_ch2_3_4_5_mpr121_ch7_gpio_motors",
                     "nearby_history": analysis["nearby_history"],
                 },
@@ -1639,6 +1780,7 @@ def create_sensor_frame(frame: SensorFrameCreate) -> dict[str, Any]:
         "stored_event": stored_event,
         "hardware": {
             "tof_mapping": HARDWARE_PROFILE["tof_sensors"],
+            "imu": HARDWARE_PROFILE["built_in_sensors"]["imu"],
             "buzzer": HARDWARE_PROFILE["actuators"]["buzzer"],
             "motors": HARDWARE_PROFILE["actuators"]["vibration_motors"],
         },
@@ -1767,6 +1909,38 @@ def legacy_latest_events(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]
     with db() as conn:
         rows = conn.execute("SELECT * FROM risk_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     return {"events": [legacy_event_dict(row) for row in rows]}
+
+
+@app.get("/api/alerts/latest")
+def latest_alerts(
+    role: str = Query("blind", pattern="^(blind|companion)$"),
+    userId: Optional[str] = Query(None),
+    deviceId: Optional[str] = Query(None),
+    sinceId: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+) -> dict[str, Any]:
+    devices = allowed_alert_devices(role, userId, deviceId)
+    placeholders = ",".join("?" for _ in ALERT_RISK_TYPES)
+    clauses = [f"risk_type IN ({placeholders})", "id > ?"]
+    params: list[Any] = list(ALERT_RISK_TYPES) + [sinceId]
+    if devices is not None:
+        device_placeholders = ",".join("?" for _ in devices)
+        clauses.append(f"device_id IN ({device_placeholders})")
+        params.extend(sorted(devices))
+
+    where = " AND ".join(clauses)
+    with db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM risk_events WHERE {where} ORDER BY id DESC LIMIT ?",
+            tuple(params + [limit]),
+        ).fetchall()
+
+    return {
+        "success": True,
+        "role": role,
+        "alerts": [alert_event_payload(row, role) for row in rows],
+        "devices": sorted(devices) if devices is not None else None,
+    }
 
 
 @app.post("/sos", status_code=201)
