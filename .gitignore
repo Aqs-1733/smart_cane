@@ -1,4 +1,5 @@
 .DS_Store
+.codex_tmp/
 *.log
 *.tmp
 .env
@@ -32,8 +33,10 @@ __pycache__/
 *.bin
 *.hex
 *.map
+firmware/smartcane_idf_diag/
 
-# ESP-IDF build artifacts.
+# Local build/config artifacts.
 build/
+build_arduino_check/
 sdkconfig
 sdkconfig.old

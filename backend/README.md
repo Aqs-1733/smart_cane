@@ -1,17 +1,17 @@
-# Smart Cane FastAPI 后端完善版
+# Smart Cane Backend
 
-本目录提供智能盲杖后端，使用 FastAPI + SQLite 保存多设备风险事件、GPS 位置、附近风险统计，并可选接入云端大模型和语音识别。
+FastAPI + SQLite backend for the ESP32-C5 smart cane project.
 
-安全原则：
+It stores risk events, stores device locations, returns nearby risk statistics, runs a lightweight backend-side deep-learning risk scorer, and optionally calls a cloud LLM/STT provider for assisted advice and voice-command parsing.
 
-- 不要把真实 API Key 写进代码、README 或 Git。
-- 把 `backend/.env.example` 复制为 `backend/.env`，只在本机填写真实 Key。
-- 如果 Key 曾经发到聊天、截图或仓库里，请立刻到平台后台撤销并重新生成。
+Do not put real API keys in Git. Keep secrets in `backend/.env`.
 
-## 安装与运行
+The ESP32-C5 firmware now uploads both event-driven risk records and periodic real sensor frames. The local safety loop remains on the cane; this backend stores collaborative map risk points, exposes alerts to the blind/companion Android roles, and calls Amap/LLM services when configured.
 
-```bash
-cd backend
+## Install
+
+```powershell
+cd D:\smartcane\backend
 py -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
@@ -19,44 +19,145 @@ copy .env.example .env
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-macOS/Linux：
+## Environment
 
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-uvicorn main:app --host 0.0.0.0 --port 8000
+Copy `.env.example` to `.env`, then fill provider keys locally.
+
+Supported LLM providers:
+
+- `LLM_PROVIDER=ark`
+- `LLM_PROVIDER=openai`
+
+If no key is configured, normal event/location/map APIs still work. AI advice falls back to rule-based text.
+
+Amap / Gaode:
+
+- Put the Web service key in `AMAP_WEB_KEY`.
+- Keep Android platform key in `frontend/SmartCane/local.properties` as `AMAP_ANDROID_KEY`.
+- The ESP32-C5 and Android app call this backend; the Amap Web key is not exposed to firmware or frontend code.
+
+## Main APIs
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/health` | health check |
+| POST | `/api/risk-events` | primary ESP32-C5 risk upload |
+| GET | `/api/risk-events` | list risk events |
+| POST | `/api/events` | compatibility alias |
+| GET | `/api/events` | compatibility alias |
+| POST | `/api/locations` | upload device location |
+| GET | `/api/locations/latest` | latest location for one device |
+| GET | `/api/locations/history` | recent location history for one device |
+| POST | `/api/sensor-frames` | hardware-adapted four-ToF frame upload and feedback analysis |
+| GET | `/api/alerts/latest` | blind/companion alerts; `voice_request` goes only to blind side |
+| GET | `/api/hardware/profile` | ESP32-C5 wiring, active levels, touch, and motor mapping |
+| GET | `/api/risks/nearby` | nearby collaborative risk summary |
+| GET | `/api/map/status` | Amap key/config status |
+| GET | `/api/map/geocode` | Amap address to coordinate |
+| GET | `/api/map/regeo` | Amap coordinate to address |
+| GET | `/api/map/risk-points` | map risk points from SQLite |
+| POST | `/api/navigation/risk-aware-route` | Amap walking route plus collaborative risk score |
+| POST | `/api/navigation/voice-route` | parse simple voice destination text and plan safer route |
+| POST | `/api/ai/deep-risk` | lightweight deep-learning risk scoring |
+| POST | `/api/ai/advice` | optional LLM advice |
+| POST | `/api/voice/text-command` | optional text command parsing |
+| POST | `/api/voice/transcribe` | optional audio transcription |
+| POST | `/api/voice/command` | optional audio command parsing |
+
+See `D:\smartcane\docs\api_contract.md` for the shared A/B/C contract.
+
+## Android Frontend Compatibility APIs
+
+The Android app in `D:\smartcane\frontend\SmartCane` uses these legacy-compatible paths:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/status` | app server status card |
+| GET | `/devices` | app device list |
+| GET | `/events/latest` | latest risk events using camelCase fields |
+| POST | `/sos` | Android app SOS upload |
+| POST | `/telemetry` | optional simulator/device telemetry upload |
+
+These endpoints read and write the same SQLite tables as `/api/risk-events` and `/api/locations`.
+
+## Hardware-Adapted Sensor Frame
+
+`POST /api/sensor-frames` is the preferred full-chain upload from ESP32-C5 or a simulator. It knows the tested wiring:
+
+- front ToF: TCA `CH2`
+- left ToF: TCA `CH3`
+- right ToF: TCA `CH4`
+- down ToF: TCA `CH5`
+- touch MPR121: TCA `CH7`
+- buzzer: GPIO `4`, low-level trigger
+- physical button: GPIO `5`, active low. Short press requests Android voice input; long press uploads `sos`.
+- vibration motors: PCA9685 blue board on root I2C `0x40`; left `CH8`, right `CH9`, center `CH10`. Do not use ESP32 GPIO `8/9/10` because they are reserved by the BMI270/BMM350 shuttle board path.
+- built-in BMI270 IMU: fall detection; BMM350 is heading reference only, not GPS/location
+
+If the Android app has uploaded a recent non-mock Amap location for the same `device_id`, the backend uses that phone location for risk events and sensor frames. Firmware mock coordinates are only a fallback.
+
+Example:
+
+```json
+{
+  "device_id": "cane_001",
+  "lat": 31.2304,
+  "lng": 121.4737,
+  "front_cm": 42,
+  "left_cm": 130,
+  "right_cm": 50,
+  "down_cm": 45,
+  "battery": 88,
+  "source": "esp32c5"
+}
 ```
 
-## 环境变量
+Response includes `risk.risk_score`, `risk.voice_prompt`, and `risk.feedback`. The frontend can speak `voice_prompt`; firmware can keep using local buzzer/motor rules offline.
 
-`LLM_PROVIDER` 可选：
+Button short press from firmware is sent as `alert_type="voice_request"` and `button_event="short_press"`. The backend stores it as a low-level operation event, exposes it only to the blind app through `/api/alerts/latest`, and does not notify the companion side or mark it as a map risk.
 
-- `ark`：火山方舟 / 豆包，使用 OpenAI-compatible Chat Completions。
-- `openai`：OpenAI 官方 API。
+Fall upload example:
 
-语音识别使用：
+```json
+{
+  "device_id": "cane_001",
+  "lat": 31.2304,
+  "lng": 121.4737,
+  "fall_detected": true,
+  "fall_stage": "confirmed",
+  "fall_confidence": 0.92,
+  "accel_total_g": 2.7,
+  "source": "esp32c5"
+}
+```
 
-- `STT_PROVIDER=openai`
-- `OPENAI_STT_MODEL=whisper-1`
+`fall_detected` is stored as a high-priority event. `/api/alerts/latest?role=blind&deviceId=cane_001` and `/api/alerts/latest?role=companion&deviceId=cane_001` both return it. The response feedback sets all vibration motors to `0` because a fallen user may not be holding the cane.
 
-如果供应商没有配置 Key，AI 建议接口会返回规则兜底建议；语音转写接口会返回 503，地图和事件接口不受影响。
+Companion-only obstacle escalation:
 
-## 接口
+- `prolonged_obstacle`: same obstacle persists for a long time.
+- `approaching_obstacle`: front distance keeps decreasing over the configured window.
 
-### GET `/api/health`
+Ordinary short obstacle detections remain local/normal risk records and do not page the companion side.
 
-健康检查。
+## Amap Risk-Aware Navigation
 
-### GET `/api/ai/status`
+`POST /api/navigation/risk-aware-route` accepts coordinates or address text. It calls Amap walking navigation, overlays stored risk points from SQLite, and returns the route with the lowest combined risk.
 
-查看 LLM/STT 是否配置成功，不会返回密钥。
+```json
+{
+  "device_id": "cane_001",
+  "origin_lat": 31.2304,
+  "origin_lng": 121.4737,
+  "destination_text": "上海人民广场",
+  "city": "上海",
+  "coordsys": "gps"
+}
+```
 
-### POST `/api/events`
+The `voice_prompt` field is LLM-enhanced when `ARK_API_KEY` or `OPENAI_API_KEY` is configured, and rule-based otherwise.
 
-上传风险事件。
+## Risk Upload Example
 
 ```json
 {
@@ -64,7 +165,12 @@ uvicorn main:app --host 0.0.0.0 --port 8000
   "lat": 31.2304,
   "lng": 121.4737,
   "risk_type": "ground_drop",
+  "level": "high",
   "risk_level": "high",
+  "direction": "stop",
+  "sensor": "tof_down",
+  "distance_mm": 950,
+  "battery": -1,
   "front_cm": 180,
   "left_cm": 130,
   "right_cm": 120,
@@ -73,48 +179,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 }
 ```
 
-### GET `/api/events`
-
-查看全部风险事件，方便演示。
-
-### POST `/api/locations`
-
-上传设备 GPS 或 mock 位置。
-
-```json
-{
-  "device_id": "cane_001",
-  "lat": 31.2304,
-  "lng": 121.4737,
-  "source": "gps",
-  "accuracy_m": 8.5,
-  "satellite_count": 9
-}
-```
-
-### GET `/api/locations/latest?device_id=cane_001`
-
-查看某个设备最近位置。
-
-### GET `/api/risks/nearby?lat=&lng=&radius=`
-
-查询附近风险统计。`radius` 单位为米，默认 80。
-
-返回：
-
-```json
-{
-  "risk_count": 3,
-  "high_count": 2,
-  "medium_count": 1,
-  "max_level": "high",
-  "recent_events": []
-}
-```
-
-### POST `/api/ai/advice`
-
-根据实时距离、历史风险和当前位置，调用云端大模型生成一句短提示。没有 Key 时返回规则兜底。
+## Deep-Learning Risk Example
 
 ```json
 {
@@ -122,40 +187,41 @@ uvicorn main:app --host 0.0.0.0 --port 8000
   "lat": 31.2304,
   "lng": 121.4737,
   "risk_type": "front_obstacle",
-  "risk_level": "high",
-  "front_cm": 45,
-  "left_cm": 120,
-  "right_cm": 50,
-  "down_cm": 45
+  "risk_level": "medium",
+  "front_cm": 75,
+  "left_cm": 130,
+  "right_cm": 55,
+  "down_cm": 45,
+  "accuracy_m": 8.5,
+  "location_quality": "usable",
+  "nearby_radius_m": 80
 }
 ```
 
-### POST `/api/voice/transcribe`
+The model is `tiny-mlp-risk-v1`, implemented in `backend/deep_model.py`. It runs on the backend only; ESP32-C5 local obstacle avoidance remains rule-based and offline-safe.
 
-上传音频文件并调用云端语音转写。适合手机端、网页端或后续 I2S 麦克风模块上传音频。
+## Collaborative Run
 
-```bash
-curl -X POST http://127.0.0.1:8000/api/voice/transcribe ^
-  -F "file=@demo.wav" ^
-  -F "language=zh"
+1. Start the backend.
+2. Flash `cane_001`, trigger a `user_mark`, `front_obstacle`, or `ground_drop`.
+3. Open `/api/risk-events` and confirm the event is saved.
+4. Change firmware `SMARTCANE_DEVICE_ID` to `cane_002`.
+5. Flash or restart the second device.
+6. The second device calls `/api/risks/nearby` and fuses nearby history with its local sensor risk.
+
+## Location Upload Example
+
+```json
+{
+  "device_id": "cane_001",
+  "lat": 31.2304,
+  "lng": 121.4737,
+  "source": "gps",
+  "provider": "beidou",
+  "quality": "usable",
+  "accuracy_m": 8.5,
+  "hdop": 1.7,
+  "fix_quality": 1,
+  "satellite_count": 9
+}
 ```
-
-### POST `/api/voice/text-command`
-
-把已转成文本的语音命令交给大模型做意图识别。固件的 electrode 0 双击演示会调用这个接口。
-
-### POST `/api/voice/command`
-
-一步完成音频转写 + 命令识别。
-
-## 多设备协同演示
-
-1. 启动后端。
-2. `cane_001` 上传 `user_mark`、`ground_drop` 或 `sos`。
-3. 查看 `/api/events`，确认风险点保存。
-4. 修改固件 `DEVICE_ID` 为 `cane_002`。
-5. 第二根盲杖启动后上传当前位置并请求 `/api/risks/nearby`。
-6. 固件本地风险逻辑融合实时距离和历史风险，AI 建议接口可进一步生成一句自然语言提示。
-
-后续可接手机定位、高德地图或 Web 前端展示；当前后端只做 SQLite 存储和经纬度近似距离计算。
-
