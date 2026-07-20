@@ -74,7 +74,6 @@ class SmartCaneAppController private constructor(
             _uiState.update { it.copy(isBusy = true, message = null) }
             val result = authRepository.login(account, password, rememberLogin)
             if (result.success && result.user != null) {
-                preferences.saveMode(result.user.role.defaultMode())
                 _uiState.update { it.copy(isBusy = false, message = "登录成功") }
             } else {
                 _uiState.update { it.copy(isBusy = false, message = result.message) }
@@ -481,7 +480,7 @@ class SmartCaneAppController private constructor(
         if (_uiState.value.sosState == SosActionState.Sending) return
         scope.launch {
             _uiState.update { it.copy(sosState = SosActionState.Sending, message = null) }
-            val result = SmartCaneApiClient.postSos(SosRequestDto(DemoData.defaultCane.deviceId, null, null, "盲人端发起紧急求助"))
+            val result = SmartCaneApiClient.postSos(SosRequestDto(DemoData.defaultCane.deviceId, null, null, "用户端发起紧急求助"))
             when (result) {
                 is ApiResult.Success -> {
                     _uiState.update { it.copy(sosState = SosActionState.Success, message = "SOS 已发送") }

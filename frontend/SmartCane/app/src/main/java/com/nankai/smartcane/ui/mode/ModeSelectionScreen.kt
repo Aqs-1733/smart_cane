@@ -48,21 +48,21 @@ fun ModeSelectionScreen(
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         ScreenTitle(
-            title = "请选择使用模式",
-            subtitle = "$userName，欢迎使用 SmartCane 本地演示。"
+            title = "选择入口",
+            subtitle = "$userName，欢迎使用 SmartCane。"
         )
-        DemoBanner("选择会保存为上次模式，下次启动可直接进入；个人中心可切换模式。")
+        DemoBanner("本账号用于比赛演示，登录后可进入用户端或陪护人端。")
 
         ModeCard(
-            title = "盲人导航模式",
-            icon = "盲",
-            bullets = listOf("路口风险建议", "语音导航", "重复播报", "设备状态", "紧急求助"),
+            title = "用户",
+            icon = "用",
+            bullets = listOf("实时风险建议", "语音播报", "设备状态", "紧急求助"),
             onClick = { onModeSelected(AppMode.Blind) }
         )
         ModeCard(
-            title = "陪护模式",
+            title = "陪护人",
             icon = "护",
-            bullets = listOf("查看被陪护人状态", "查看盲杖在线状态", "风险提醒", "SOS 信息", "位置与路线展示"),
+            bullets = listOf("查看用户状态", "查看设备在线状态", "风险提醒", "SOS 信息", "位置与路线展示"),
             onClick = { onModeSelected(AppMode.Companion) }
         )
         BigSecondaryButton(text = "退出登录", onClick = onLogout)
@@ -100,5 +100,4 @@ private fun ModeCard(
         }
     }
 }
-
 

@@ -1,10 +1,8 @@
 ﻿package com.nankai.smartcane.ui.auth
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,7 +22,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -52,13 +49,10 @@ import com.nankai.smartcane.ui.components.SmartTeal
 fun LoginScreen(
     isBusy: Boolean,
     message: String?,
-    onLogin: (String, String, Boolean) -> Unit,
-    onBlindDemo: () -> Unit,
-    onCompanionDemo: () -> Unit,
-    onMessageShown: () -> Unit
+    onLogin: (String, String, Boolean) -> Unit
 ) {
-    var account by rememberSaveable { mutableStateOf("") }
-    var password by rememberSaveable { mutableStateOf("") }
+    var account by rememberSaveable { mutableStateOf("demo") }
+    var password by rememberSaveable { mutableStateOf("123456") }
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
 
@@ -94,9 +88,9 @@ fun LoginScreen(
             }
             Spacer(Modifier.height(14.dp))
             Text("SmartCane", fontSize = 34.sp, fontWeight = FontWeight.Black, color = Color(0xFF0F172A))
-            Text("智能导盲与远程陪护", fontSize = 16.sp, color = Color(0xFF64748B), lineHeight = 22.sp)
+            Text("智能出行与远程陪护", fontSize = 16.sp, color = Color(0xFF64748B), lineHeight = 22.sp)
 
-            Spacer(Modifier.height(26.dp))
+            Spacer(Modifier.height(34.dp))
             OutlinedTextField(
                 value = account,
                 onValueChange = { account = it; localError = null },
@@ -143,36 +137,18 @@ fun LoginScreen(
                 colors = ButtonDefaults.buttonColors(containerColor = SmartTeal)
             ) { Text(if (isBusy) "登录中…" else "登录", fontSize = 18.sp, fontWeight = FontWeight.Bold) }
 
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                TextButton(onClick = { localError = "暂未开放注册" }) { Text("注册", color = Color(0xFF64748B)) }
-                TextButton(onClick = { localError = "暂不支持找回密码" }) { Text("忘记密码", color = Color(0xFF64748B)) }
+            Spacer(Modifier.height(14.dp))
+            Surface(color = Color.White.copy(alpha = 0.78f), shape = RoundedCornerShape(18.dp)) {
+                Text(
+                    "测试账号：demo / 123456",
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    color = Color(0xFF64748B),
+                    fontSize = 14.sp,
+                    textAlign = TextAlign.Center
+                )
             }
-
             Spacer(Modifier.weight(1f))
-            Text("快速体验", color = Color(0xFF334155), fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(10.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                ExperienceButton("体验盲人端", "直达首页", Modifier.weight(1f), !isBusy, onBlindDemo)
-                ExperienceButton("体验陪护端", "查看状态", Modifier.weight(1f), !isBusy, onCompanionDemo)
-            }
-            Spacer(Modifier.height(8.dp))
-            Text("演示账号不保存真实密码", color = Color(0xFF94A3B8), fontSize = 12.sp, textAlign = TextAlign.Center)
-        }
-    }
-}
-
-@Composable
-private fun ExperienceButton(title: String, subtitle: String, modifier: Modifier, enabled: Boolean, onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        enabled = enabled,
-        modifier = modifier.height(72.dp),
-        shape = RoundedCornerShape(22.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color(0xFF0F172A))
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            Text(title, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-            Text(subtitle, fontSize = 12.sp, color = Color(0xFF64748B), maxLines = 1)
+            Text("登录后选择用户或陪护人入口", color = Color(0xFF94A3B8), fontSize = 12.sp, textAlign = TextAlign.Center)
         }
     }
 }

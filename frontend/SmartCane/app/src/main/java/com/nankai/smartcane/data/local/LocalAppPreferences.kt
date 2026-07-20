@@ -26,6 +26,8 @@ class LocalAppPreferences(context: Context) {
             .putString(KEY_DISPLAY_NAME, user.displayName)
             .putString(KEY_ROLE, user.role.name)
             .putBoolean(KEY_IS_DEMO, user.isDemo)
+            .remove(KEY_LAST_MODE)
+            .remove(KEY_FIRST_GUIDE_COMPLETED)
             .apply()
         refresh()
     }

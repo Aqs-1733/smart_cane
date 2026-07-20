@@ -17,6 +17,7 @@ class DemoAuthRepository(
     override suspend fun login(account: String, password: String, rememberLogin: Boolean): AuthResult {
         val normalized = account.trim()
         val user: UserProfile? = when (normalized) {
+            DemoData.TEST_ACCOUNT -> DemoData.blindUser
             DemoData.BLIND_ACCOUNT -> DemoData.blindUser
             DemoData.COMPANION_ACCOUNT -> DemoData.companionUser
             else -> null
@@ -25,7 +26,7 @@ class DemoAuthRepository(
         if (user == null || password != DemoData.DEMO_PASSWORD) {
             return AuthResult(
                 success = false,
-                message = "账号或密码错误。演示账号为 blind_demo / companion_demo，密码 123456。"
+                message = "账号或密码错误。测试账号 demo，密码 123456。"
             )
         }
 
@@ -41,4 +42,3 @@ class DemoAuthRepository(
         preferences.clearDemoData()
     }
 }
-

@@ -150,6 +150,26 @@ data class SensorFrameRequestDto(
     val alertType: String? = null
 )
 
+data class AiAdviceRequestDto(
+    val deviceId: String,
+    val latitude: Double?,
+    val longitude: Double?,
+    val riskType: String,
+    val level: String,
+    val frontMm: Int?,
+    val leftMm: Int?,
+    val rightMm: Int?,
+    val downMm: Int?
+)
+
+data class AiAdviceDto(
+    val provider: String,
+    val model: String,
+    val enabled: Boolean,
+    val advice: String,
+    val fallback: Boolean
+)
+
 data class SensorFrameResultDto(
     val riskType: String,
     val riskLevel: String,
@@ -340,6 +360,14 @@ object SmartCaneApiClient {
         }
     }
 
+    suspend fun postAiAdvice(request: AiAdviceRequestDto): ApiResult<AiAdviceDto> = withContext(Dispatchers.IO) {
+        try {
+            ApiResult.Success(postJson("/api/ai-advice", request.toJson()).toAiAdviceDto())
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
     suspend fun postVoiceRoute(
         text: String,
         currentLatitude: Double?,
@@ -443,6 +471,19 @@ object SmartCaneApiClient {
         put("fall_confidence", fallConfidence ?: JSONObject.NULL)
         put("alert_type", alertType ?: JSONObject.NULL)
         put("source", "android_frontend_sim")
+    }
+
+    private fun AiAdviceRequestDto.toJson(): JSONObject = JSONObject().apply {
+        put("device_id", deviceId)
+        put("lat", latitude ?: JSONObject.NULL)
+        put("lng", longitude ?: JSONObject.NULL)
+        put("risk_type", riskType)
+        put("level", level)
+        put("front_mm", frontMm ?: JSONObject.NULL)
+        put("left_mm", leftMm ?: JSONObject.NULL)
+        put("right_mm", rightMm ?: JSONObject.NULL)
+        put("down_mm", downMm ?: JSONObject.NULL)
+        put("source", "android_frontend_advice")
     }
 
     private fun JSONObject.toLatestRiskEventDto(): LatestRiskEventDto {
@@ -603,6 +644,19 @@ object SmartCaneApiClient {
         )
     }
 
+    private fun JSONObject.toAiAdviceDto(): AiAdviceDto {
+        val adviceText = cleanText(optString("ai_message"))
+            ?: cleanText(optString("advice"))
+            ?: "请慢行，注意附近风险。"
+        return AiAdviceDto(
+            provider = optString("provider", "unknown"),
+            model = optString("model", ""),
+            enabled = optBoolean("enabled", false),
+            advice = adviceText,
+            fallback = optBoolean("fallback", true)
+        )
+    }
+
     private fun JSONObject.toRouteAdviceDto(): RouteAdviceDto {
         val bestRoute = optJSONObject("best_route") ?: optJSONObject("bestRoute")
         return RouteAdviceDto(
@@ -613,6 +667,9 @@ object SmartCaneApiClient {
             riskScore = bestRoute?.nullableDouble("risk_score") ?: bestRoute?.nullableDouble("riskScore")
         )
     }
+
+    private fun cleanText(value: String?): String? =
+        value?.trim()?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
 
     private fun JSONObject.nullableDouble(name: String): Double? = if (has(name) && !isNull(name)) optDouble(name) else null
     private fun JSONObject.nullableInt(name: String): Int? = if (has(name) && !isNull(name)) optInt(name) else null

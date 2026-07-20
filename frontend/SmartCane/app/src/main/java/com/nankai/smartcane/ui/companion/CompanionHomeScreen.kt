@@ -132,7 +132,7 @@ fun CompanionHomeScreen(
             BigSecondaryButton("管理", onClick = onAddCareTarget, modifier = Modifier.weight(1f))
         }
         if (active) BigSecondaryButton("解除关联", onClick = { showUnlink = true })
-        BigSecondaryButton("切换到盲人模式", onClick = onSwitchMode)
+        BigSecondaryButton("切换到用户入口", onClick = onSwitchMode)
         BigSecondaryButton("清除演示数据", onClick = onClearDemoData)
         BigSecondaryButton("退出登录", onClick = onLogout)
     }
@@ -157,5 +157,4 @@ private fun CompactMetric(title: String, value: String, modifier: Modifier = Mod
         }
     }
 }
-
 

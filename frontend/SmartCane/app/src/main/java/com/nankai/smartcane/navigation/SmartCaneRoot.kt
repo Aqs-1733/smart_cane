@@ -99,10 +99,7 @@ fun SmartCaneRootApp() {
             AppRoute.Login -> LoginScreen(
                 isBusy = uiState.isBusy,
                 message = uiState.message,
-                onLogin = controller::login,
-                onBlindDemo = controller::loginDemoBlind,
-                onCompanionDemo = controller::loginDemoCompanion,
-                onMessageShown = controller::dismissMessage
+                onLogin = controller::login
             )
             AppRoute.ModeSelection -> ModeSelectionScreen(
                 userName = uiState.currentUser?.displayName ?: "演示用户",

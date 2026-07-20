@@ -150,6 +150,44 @@ class AdviceRequest(BaseModel):
     nearby_radius_m: float = Field(80.0, gt=0, le=5000)
 
 
+class AiAdviceCompatRequest(BaseModel):
+    device_id: str = Field(..., min_length=1)
+    lat: float
+    lng: float
+    risk_type: str = "none"
+    risk_level: Optional[str] = Field(None, pattern="^(low|medium|high)$")
+    level: Optional[str] = Field(None, pattern="^(low|medium|high)$")
+    front_cm: Optional[int] = None
+    left_cm: Optional[int] = None
+    right_cm: Optional[int] = None
+    down_cm: Optional[int] = None
+    front_mm: Optional[int] = None
+    left_mm: Optional[int] = None
+    right_mm: Optional[int] = None
+    down_mm: Optional[int] = None
+    accuracy_m: Optional[float] = None
+    location_quality: Optional[str] = None
+    extra: Optional[str] = None
+    nearby_radius_m: float = Field(80.0, gt=0, le=5000)
+
+    def to_advice_request(self) -> AdviceRequest:
+        return AdviceRequest(
+            device_id=self.device_id,
+            lat=self.lat,
+            lng=self.lng,
+            risk_type=self.risk_type,
+            risk_level=self.risk_level or self.level or "low",
+            front_cm=self.front_cm if self.front_cm is not None else mm_to_cm(self.front_mm),
+            left_cm=self.left_cm if self.left_cm is not None else mm_to_cm(self.left_mm),
+            right_cm=self.right_cm if self.right_cm is not None else mm_to_cm(self.right_mm),
+            down_cm=self.down_cm if self.down_cm is not None else mm_to_cm(self.down_mm),
+            accuracy_m=self.accuracy_m,
+            location_quality=self.location_quality,
+            extra=self.extra,
+            nearby_radius_m=self.nearby_radius_m,
+        )
+
+
 class DeepRiskRequest(BaseModel):
     device_id: str = Field(..., min_length=1)
     lat: float
@@ -280,6 +318,12 @@ def env(name: str, default: str = "") -> str:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def mm_to_cm(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    return int(round(value / 10))
 
 
 def db() -> sqlite3.Connection:
@@ -1565,7 +1609,7 @@ def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, 
     if risk_type == "sos":
         return "SOS 已发送，请停在安全位置等待联系。"
     if risk_type == "fall_detected":
-        return "检测到疑似跌倒，已通知盲人端和陪护端，请保持原地。"
+        return "检测到疑似跌倒，已通知用户端和陪护端，请保持原地。"
     if risk_type == "prolonged_obstacle":
         return "同一障碍持续出现，已通知陪护端，请停止并重新探测。"
     if risk_type == "approaching_obstacle":
@@ -2638,7 +2682,13 @@ async def ai_advice(req: AdviceRequest) -> dict[str, Any]:
     history = nearby_summary(req.lat, req.lng, req.nearby_radius_m)
     deep = score_deep_risk(req, history)
     result = await generate_advice(req, history, deep)
-    return {**result, "nearby": history, "deep_learning": deep}
+    advice = result.get("advice") or fallback_advice(req, history)
+    return {**result, "advice": advice, "ai_message": advice, "nearby": history, "deep_learning": deep}
+
+
+@app.post("/api/ai-advice")
+async def ai_advice_compat(req: AiAdviceCompatRequest) -> dict[str, Any]:
+    return await ai_advice(req.to_advice_request())
 
 
 @app.post("/api/voice/text-command")
