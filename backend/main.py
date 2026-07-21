@@ -1740,6 +1740,13 @@ async def resolve_route_endpoint(request: MapRouteRequest) -> tuple[float, float
 
 def chat_config() -> dict[str, str]:
     provider = env("LLM_PROVIDER", "ark").lower()
+    if provider in {"vei", "volces", "volcengine", "ai_gateway"}:
+        return {
+            "provider": "vei",
+            "api_key": env("VEI_API_KEY"),
+            "base_url": env("VEI_BASE_URL", env("VEI_OPENAI_BASE_URL", "https://ai-gateway.vei.volces.com/v1")).rstrip("/"),
+            "model": env("VEI_MODEL", "doubao-1.5-lite-32k"),
+        }
     if provider == "openai":
         return {
             "provider": "openai",

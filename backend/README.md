@@ -25,8 +25,19 @@ Copy `.env.example` to `.env`, then fill provider keys locally.
 
 Supported LLM providers:
 
+- `LLM_PROVIDER=vei`
 - `LLM_PROVIDER=ark`
 - `LLM_PROVIDER=openai`
+
+For Volcengine VEI AI Gateway / Doubao examples that use
+`https://ai-gateway.vei.volces.com/v1/chat/completions`, configure:
+
+```env
+LLM_PROVIDER=vei
+VEI_API_KEY=...
+VEI_BASE_URL=https://ai-gateway.vei.volces.com/v1
+VEI_MODEL=doubao-1.5-lite-32k
+```
 
 If no key is configured, normal event/location/map APIs still work. AI advice falls back to rule-based text.
 
@@ -155,7 +166,7 @@ Ordinary short obstacle detections remain local/normal risk records and do not p
 }
 ```
 
-The `voice_prompt` field is LLM-enhanced when `ARK_API_KEY` or `OPENAI_API_KEY` is configured, and rule-based otherwise.
+The `voice_prompt` field is LLM-enhanced when `VEI_API_KEY`, `ARK_API_KEY`, or `OPENAI_API_KEY` is configured, and rule-based otherwise.
 
 ## Risk Upload Example
 
