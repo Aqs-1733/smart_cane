@@ -79,8 +79,12 @@ fun SmartCaneRootApp() {
     DisposableEffect(route, uiState.currentUser?.userId) {
         when (route) {
             AppRoute.BlindPairing -> controller.startBlindRequestPolling()
-            AppRoute.CompanionPairing -> controller.startCompanionRelationPolling()
-            AppRoute.CompanionHome -> {
+            AppRoute.CompanionPairing,
+            AppRoute.CompanionHome,
+            AppRoute.CompanionRisk,
+            AppRoute.CompanionMap,
+            AppRoute.CompanionCollaboration,
+            AppRoute.CompanionMine -> {
                 controller.startCompanionRelationPolling()
                 controller.startAlertPolling()
             }
@@ -89,6 +93,12 @@ fun SmartCaneRootApp() {
         }
         onDispose {
             if (route is AppRoute.BlindPairing || route is AppRoute.CompanionPairing) controller.stopPairingPolling()
+        }
+    }
+
+    LaunchedEffect(route, uiState.currentRelation?.relationId, uiState.currentRelation?.status) {
+        if (route is AppRoute.CompanionPairing && uiState.currentRelation?.status == RelationStatus.Active) {
+            route = AppRoute.CompanionMine
         }
     }
 
@@ -119,9 +129,9 @@ fun SmartCaneRootApp() {
                 voiceState = uiState.voiceState,
                 sosState = uiState.sosState,
                 message = uiState.message,
+                voiceTranscript = uiState.voiceTranscript,
                 urgentAlert = uiState.urgentAlert,
                 onVoiceToggle = controller::toggleVoiceListening,
-                onRepeat = controller::repeatNavigationPrompt,
                 onSos = controller::sendBlindSos,
                 onDismissAlert = controller::dismissUrgentAlert,
                 onOpenSettings = { route = AppRoute.BlindPairing }
@@ -170,7 +180,7 @@ fun SmartCaneRootApp() {
                 onFindCode = controller::findPairingCode,
                 onSendRequest = controller::sendRelationRequest,
                 onUnlink = controller::unlinkRelation,
-                onBack = { route = AppRoute.CompanionRisk }
+                onBack = { route = AppRoute.CompanionMine }
             )
             AppRoute.CompanionRisk -> CompanionLegacyShell(0, { route = companionTabToRoute(it) }) { GuidePage() }
             AppRoute.CompanionMap -> CompanionLegacyShell(1, { route = companionTabToRoute(it) }) { MapPage() }
@@ -178,10 +188,14 @@ fun SmartCaneRootApp() {
             AppRoute.CompanionMine -> CompanionLegacyShell(3, { route = companionTabToRoute(it) }) {
                 MinePage(
                     userName = uiState.currentUser?.displayName ?: "陪护人",
+                    relation = uiState.currentRelation ?: controller.relation(),
                     onSwitchToBlind = {
                         controller.selectMode(AppMode.Blind)
                         route = AppRoute.BlindHome
                     },
+                    onAddCareTarget = { route = AppRoute.CompanionPairing },
+                    onViewCareStatus = { route = AppRoute.CompanionRisk },
+                    onUnlink = controller::unlinkRelation,
                     onLogout = controller::logout
                 )
             }

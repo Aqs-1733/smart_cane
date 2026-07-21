@@ -80,6 +80,7 @@ import com.amap.api.maps.model.LatLng
 import com.amap.api.maps.model.MarkerOptions
 import com.amap.api.maps.model.MyLocationStyle
 import com.amap.api.maps.model.PolylineOptions
+import com.nankai.smartcane.data.model.CareRelation
 import com.nankai.smartcane.data.network.AiAdviceDto
 import com.nankai.smartcane.data.network.AiAdviceRequestDto
 import com.nankai.smartcane.data.network.ApiResult
@@ -1044,10 +1045,15 @@ private fun SosStatusContent(state: SosUiState) {
 
 @Composable
 fun MinePage(
-    userName: String = "陪护人",
+    userName: String = "\u966a\u62a4\u4eba",
+    relation: CareRelation? = null,
     onSwitchToBlind: () -> Unit = {},
+    onAddCareTarget: () -> Unit = {},
+    onViewCareStatus: () -> Unit = {},
+    onUnlink: () -> Unit = {},
     onLogout: () -> Unit = {}
 ) {
+    var showUnlinkConfirm by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 20.dp)) {
         item { AppHeader("我的", "账号与设备") }
         item {
@@ -1059,12 +1065,42 @@ fun MinePage(
                 Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("当前账号", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
                     StatusRow("用户名", userName)
+                    Button(onClick = onAddCareTarget, modifier = Modifier.fillMaxWidth()) { Text("\u8f93\u5165\u9080\u8bf7\u7801\u6dfb\u52a0\u7528\u6237") }
                     OutlinedButton(onClick = onSwitchToBlind, modifier = Modifier.fillMaxWidth()) { Text("切换到用户模式") }
                     Button(onClick = onLogout, modifier = Modifier.fillMaxWidth()) { Text("退出登录") }
                 }
             }
         }
+        item {
+            relation?.let { currentRelation ->
+                Card(
+                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                    shape = RoundedCornerShape(24.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White)
+                ) {
+                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("\u5f53\u524d\u966a\u62a4\u5bf9\u8c61", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
+                        StatusRow("\u76f2\u4eba\u7528\u6237", currentRelation.blindUser.displayName)
+                        StatusRow("\u76f2\u6756", currentRelation.caneDevice.name)
+                        StatusRow("\u5173\u8054\u72b6\u6001", currentRelation.status.displayName)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            OutlinedButton(onClick = onViewCareStatus, modifier = Modifier.weight(1f)) { Text("\u67e5\u770b\u72b6\u6001") }
+                            OutlinedButton(onClick = { showUnlinkConfirm = true }, modifier = Modifier.weight(1f)) { Text("\u89e3\u9664\u5173\u8054") }
+                        }
+                    }
+                }
+            }
+        }
         item { DeviceStatusFromServer() }
+    }
+    if (showUnlinkConfirm) {
+        AlertDialog(
+            onDismissRequest = { showUnlinkConfirm = false },
+            title = { Text("\u89e3\u9664\u5173\u8054\uff1f") },
+            text = { Text("\u89e3\u9664\u540e\u9700\u8981\u91cd\u65b0\u8f93\u5165\u9080\u8bf7\u7801\u5173\u8054\u3002") },
+            confirmButton = { TextButton(onClick = { showUnlinkConfirm = false; onUnlink() }) { Text("\u89e3\u9664") } },
+            dismissButton = { TextButton(onClick = { showUnlinkConfirm = false }) { Text("\u53d6\u6d88") } }
+        )
     }
 }
 
