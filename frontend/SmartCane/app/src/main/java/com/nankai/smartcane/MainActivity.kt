@@ -236,7 +236,7 @@ private fun LatestRiskEventDto.toMapMarker(context: Context): MapRiskMarker? {
     return MapRiskMarker(
         position = convertGpsToAmap(context, LatLng(lat, lng)),
         title = "${riskLevelLabel(level)}：${riskTypeLabel(riskType)}",
-        snippet = messageText,
+        snippet = "\u6765\u6e90\u8bbe\u5907 $deviceId\n$messageText",
         hue = riskLevelHue(level)
     )
 }
@@ -586,7 +586,7 @@ fun MapPage() {
 
     LaunchedEffect(retryKey) {
         state = MapRiskUiState.Loading
-        state = when (val result = SmartCaneApiClient.getMapRiskPoints(DEMO_CENTER_LAT, DEMO_CENTER_LNG, 900)) {
+        state = when (val result = SmartCaneApiClient.getMapRiskPoints()) {
             is ApiResult.Success -> MapRiskUiState.Success(result.data)
             is ApiResult.Failure -> MapRiskUiState.Error(result.message)
         }
@@ -607,6 +607,9 @@ fun MapPage() {
 
     val points = (state as? MapRiskUiState.Success)?.points.orEmpty()
     val events = points.map { it.toRiskEvent() }
+    val highCount = points.count { it.riskLevel.equals("high", ignoreCase = true) }
+    val mediumCount = points.count { it.riskLevel.equals("medium", ignoreCase = true) }
+    val sourceDeviceCount = points.map { it.deviceId }.filter { it.isNotBlank() }.distinct().size
 
     BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFFEEF6F7))) {
         val panelExpandedHeight = maxHeight * 0.55f
@@ -619,6 +622,9 @@ fun MapPage() {
 
             MapTopBar(
                 pointCount = points.size,
+                highCount = highCount,
+                mediumCount = mediumCount,
+                sourceDeviceCount = sourceDeviceCount,
                 locationGranted = locationGranted,
                 modifier = Modifier.align(Alignment.TopCenter)
             )
@@ -652,7 +658,7 @@ private fun RiskMapViewport(points: List<LatestRiskEventDto>, showMyLocation: Bo
 }
 
 @Composable
-private fun MapTopBar(pointCount: Int, locationGranted: Boolean, modifier: Modifier = Modifier) {
+private fun MapTopBar(pointCount: Int, highCount: Int, mediumCount: Int, sourceDeviceCount: Int, locationGranted: Boolean, modifier: Modifier = Modifier) {
     Surface(
         modifier = modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp),
         color = Color.White.copy(alpha = 0.94f),
