@@ -391,7 +391,7 @@ class SmartCaneAppController private constructor(
 
     private fun startVoiceListening() {
         if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
-            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "手机不支持系统语音识别") }
+            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "\u624b\u673a\u4e0d\u652f\u6301\u7cfb\u7edf\u8bed\u97f3\u8bc6\u522b", voiceTranscript = "\u624b\u673a\u4e0d\u652f\u6301\u7cfb\u7edf\u8bed\u97f3\u8bc6\u522b") }
             return
         }
 
@@ -399,11 +399,17 @@ class SmartCaneAppController private constructor(
             speechRecognizer = it
             it.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
-                    _uiState.update { state -> state.copy(voiceState = VoiceState.Listening, message = "正在听你说") }
+                    _uiState.update { state ->
+                        state.copy(
+                            voiceState = VoiceState.Listening,
+                            message = "\u6b63\u5728\u542c\u4f60\u8bf4",
+                            voiceTranscript = null
+                        )
+                    }
                 }
 
                 override fun onBeginningOfSpeech() {
-                    _uiState.update { state -> state.copy(message = "正在识别") }
+                    _uiState.update { state -> state.copy(message = "\u6b63\u5728\u8bc6\u522b", voiceTranscript = "\u6b63\u5728\u8bc6\u522b\u2026") }
                 }
 
                 override fun onRmsChanged(rmsdB: Float) = Unit
@@ -411,19 +417,19 @@ class SmartCaneAppController private constructor(
 
                 override fun onEndOfSpeech() {
                     voiceRecognitionActive = false
-                    _uiState.update { state -> state.copy(message = "正在理解") }
+                    _uiState.update { state -> state.copy(message = "\u6b63\u5728\u7406\u89e3", voiceTranscript = state.voiceTranscript ?: "\u6b63\u5728\u6574\u7406\u5b57\u5e55\u2026") }
                 }
 
                 override fun onError(error: Int) {
                     voiceRecognitionActive = false
                     val message = when (error) {
-                        SpeechRecognizer.ERROR_NO_MATCH -> "没听清，请再按一次按钮"
-                        SpeechRecognizer.ERROR_AUDIO -> "麦克风异常"
-                        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "语音网络不可用"
-                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "请给 App 开启麦克风权限"
-                        else -> "语音识别失败，请再试一次"
+                        SpeechRecognizer.ERROR_NO_MATCH -> "\u6ca1\u542c\u6e05\uff0c\u8bf7\u518d\u6309\u4e00\u6b21\u6309\u94ae"
+                        SpeechRecognizer.ERROR_AUDIO -> "\u9ea6\u514b\u98ce\u5f02\u5e38"
+                        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "\u8bed\u97f3\u7f51\u7edc\u4e0d\u53ef\u7528"
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "\u8bf7\u7ed9 App \u5f00\u542f\u9ea6\u514b\u98ce\u6743\u9650"
+                        else -> "\u8bed\u97f3\u8bc6\u522b\u5931\u8d25\uff0c\u8bf7\u518d\u8bd5\u4e00\u6b21"
                     }
-                    _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = message) }
+                    _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = message, voiceTranscript = message) }
                 }
 
                 override fun onResults(results: Bundle?) {
@@ -433,20 +439,28 @@ class SmartCaneAppController private constructor(
                         ?.firstOrNull()
                         ?.trim()
                     if (text.isNullOrBlank()) {
-                        _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = "没听清，请再试一次") }
+                        _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = "\u6ca1\u542c\u6e05\uff0c\u8bf7\u518d\u8bd5\u4e00\u6b21", voiceTranscript = "\u6ca1\u542c\u6e05\uff0c\u8bf7\u518d\u8bd5\u4e00\u6b21") }
                         return
                     }
 
                     scope.launch {
-                        _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = "你说：$text") }
+                        _uiState.update { state -> state.copy(voiceState = VoiceState.Idle, message = "\u4f60\u8bf4\uff1a$text", voiceTranscript = text) }
                         when (val result = SmartCaneApiClient.postVoiceRoute(text, null, null)) {
-                            is ApiResult.Success -> speakText(result.data.voicePrompt.ifBlank { "已收到路线请求" })
-                            is ApiResult.Failure -> speakText("语音指令已收到，但后端暂时不可用")
+                            is ApiResult.Success -> speakText(result.data.voicePrompt.ifBlank { "\u5df2\u6536\u5230\u8def\u7ebf\u8bf7\u6c42" })
+                            is ApiResult.Failure -> speakText("\u8bed\u97f3\u6307\u4ee4\u5df2\u6536\u5230\uff0c\u4f46\u540e\u7aef\u6682\u65f6\u4e0d\u53ef\u7528")
                         }
                     }
                 }
 
-                override fun onPartialResults(partialResults: Bundle?) = Unit
+                override fun onPartialResults(partialResults: Bundle?) {
+                    val partialText = partialResults
+                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        ?.firstOrNull()
+                        ?.trim()
+                    if (!partialText.isNullOrBlank()) {
+                        _uiState.update { state -> state.copy(voiceTranscript = partialText, message = "\u6b63\u5728\u8bc6\u522b") }
+                    }
+                }
                 override fun onEvent(eventType: Int, params: Bundle?) = Unit
             })
         }
@@ -454,17 +468,17 @@ class SmartCaneAppController private constructor(
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "请说出目的地或操作指令")
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "\u8bf7\u8bf4\u51fa\u76ee\u7684\u5730\u6216\u64cd\u4f5c\u6307\u4ee4")
         }
 
         try {
             voiceRecognitionActive = true
-            _uiState.update { it.copy(voiceState = VoiceState.Listening, message = "正在听你说") }
+            _uiState.update { it.copy(voiceState = VoiceState.Listening, message = "\u6b63\u5728\u542c\u4f60\u8bf4", voiceTranscript = null) }
             recognizer.startListening(intent)
         } catch (_: SecurityException) {
             voiceRecognitionActive = false
-            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "请在系统设置中开启麦克风权限") }
+            _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "\u8bf7\u5728\u7cfb\u7edf\u8bbe\u7f6e\u4e2d\u5f00\u542f\u9ea6\u514b\u98ce\u6743\u9650", voiceTranscript = "\u8bf7\u5728\u7cfb\u7edf\u8bbe\u7f6e\u4e2d\u5f00\u542f\u9ea6\u514b\u98ce\u6743\u9650") }
         }
     }
 
@@ -473,7 +487,7 @@ class SmartCaneAppController private constructor(
             speechRecognizer?.stopListening()
         }
         voiceRecognitionActive = false
-        _uiState.update { it.copy(voiceState = VoiceState.Idle, message = message) }
+        _uiState.update { it.copy(voiceState = VoiceState.Idle, message = message, voiceTranscript = it.voiceTranscript ?: message) }
     }
 
     fun sendBlindSos() {
@@ -551,6 +565,7 @@ data class AppUiState(
     val sosState: SosActionState = SosActionState.Idle,
     val isNavigationPaused: Boolean = false,
     val lastSpokenText: String? = null,
+    val voiceTranscript: String? = null,
     val urgentAlert: EmergencyAlertDto? = null
 ) {
     val isLoggedIn: Boolean get() = storedState.isLoggedIn
