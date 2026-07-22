@@ -39,7 +39,8 @@ SIDE_NEAR_CM = 55
 GROUND_BASE_CM = 45
 GROUND_DROP_THRESHOLD_CM = 30
 DEFAULT_NEARBY_RADIUS_M = 80.0
-ROUTE_RISK_BUFFER_M = 35.0
+ROUTE_RISK_BUFFER_M = 8.0
+WALKING_NAVIGATION_MAX_DISTANCE_M = 3000.0
 RISK_POINT_CLUSTER_RADIUS_M = 12.0
 RISK_POINT_TRANSIENT_TTL_SECONDS = 2 * 60 * 60
 RISK_POINT_FIXED_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -1940,25 +1941,90 @@ def min_distance_to_points(lat: float, lng: float, points: list[dict[str, float]
     return min(haversine_m(lat, lng, point["lat"], point["lng"]) for point in points)
 
 
-def route_risk_summary(points: list[dict[str, float]], buffer_m: float) -> dict[str, Any]:
+def local_xy_m(lat: float, lng: float, ref_lat: float, ref_lng: float) -> tuple[float, float]:
+    radius_m = 6371000.0
+    x = math.radians(lng - ref_lng) * radius_m * math.cos(math.radians(ref_lat))
+    y = math.radians(lat - ref_lat) * radius_m
+    return x, y
+
+
+def point_to_segment_distance_m(
+    point_lat: float,
+    point_lng: float,
+    start_lat: float,
+    start_lng: float,
+    end_lat: float,
+    end_lng: float,
+) -> float:
+    px, py = local_xy_m(point_lat, point_lng, start_lat, start_lng)
+    ax, ay = 0.0, 0.0
+    bx, by = local_xy_m(end_lat, end_lng, start_lat, start_lng)
+    dx = bx - ax
+    dy = by - ay
+    length_sq = dx * dx + dy * dy
+    if length_sq <= 0:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
+    closest_x = ax + t * dx
+    closest_y = ay + t * dy
+    return math.hypot(px - closest_x, py - closest_y)
+
+
+def min_distance_to_polyline_m(lat: float, lng: float, points: list[dict[str, float]]) -> float:
     if not points:
-        return {"risk_score": 0.0, "risk_points": [], "high_count": 0, "medium_count": 0, "max_level": "low"}
-    with db() as conn:
-        rows = conn.execute("SELECT * FROM risk_events WHERE lat IS NOT NULL AND lng IS NOT NULL").fetchall()
+        return float("inf")
+    if len(points) == 1:
+        return haversine_m(lat, lng, points[0]["lat"], points[0]["lng"])
+    return min(
+        point_to_segment_distance_m(
+            lat,
+            lng,
+            points[index]["lat"],
+            points[index]["lng"],
+            points[index + 1]["lat"],
+            points[index + 1]["lng"],
+        )
+        for index in range(len(points) - 1)
+    )
+
+
+async def route_risk_summary(points: list[dict[str, float]], buffer_m: float) -> dict[str, Any]:
+    if not points:
+        return {
+            "risk_score": 0.0,
+            "risk_points": [],
+            "risk_count": 0,
+            "medium_high_count": 0,
+            "high_count": 0,
+            "medium_count": 0,
+            "max_level": "low",
+        }
 
     risk_points: list[dict[str, Any]] = []
     score = 0.0
-    for row in rows:
-        item = event_to_dict(row)
-        distance = min_distance_to_points(float(item["lat"]), float(item["lng"]), points)
+    for item in active_risk_points(limit=1000):
+        level = str(item.get("risk_level") or item.get("riskLevel") or "low").lower()
+        try:
+            risk_lat, risk_lng = await convert_to_amap_coord(float(item["lat"]), float(item["lng"]), "gps")
+        except Exception:
+            risk_lat, risk_lng = float(item["lat"]), float(item["lng"])
+        distance = min_distance_to_polyline_m(risk_lat, risk_lng, points)
         if distance > buffer_m:
             continue
-        level = item.get("risk_level", "low")
         base = {"high": 32, "medium": 16, "low": 5}.get(level, 5)
         proximity = (1 - distance / buffer_m) ** 2
         contribution = base * proximity
         score += contribution
-        risk_points.append({**item, "distance_to_route_m": round(distance, 1), "score_contribution": round(contribution, 1)})
+        risk_points.append(
+            {
+                **item,
+                "risk_level": level,
+                "riskLevel": level,
+                "distance_to_route_m": round(distance, 1),
+                "distanceToRouteM": round(distance, 1),
+                "score_contribution": round(contribution, 1),
+            }
+        )
 
     risk_points.sort(key=lambda item: item["score_contribution"], reverse=True)
     max_level = "low"
@@ -1969,6 +2035,7 @@ def route_risk_summary(points: list[dict[str, float]], buffer_m: float) -> dict[
         "risk_score": round(clamp(score, 0, 100), 1),
         "risk_points": risk_points[:20],
         "risk_count": len(risk_points),
+        "medium_high_count": sum(1 for item in risk_points if item["risk_level"] in {"medium", "high"}),
         "high_count": sum(1 for item in risk_points if item["risk_level"] == "high"),
         "medium_count": sum(1 for item in risk_points if item["risk_level"] == "medium"),
         "max_level": max_level,
@@ -1980,10 +2047,11 @@ async def plan_walking_route(
     origin_lng: float,
     destination_lat: float,
     destination_lng: float,
-    coordsys: str,
+    origin_coordsys: str,
+    destination_coordsys: str,
 ) -> dict[str, Any]:
-    origin_amap_lat, origin_amap_lng = await convert_to_amap_coord(origin_lat, origin_lng, coordsys)
-    dest_amap_lat, dest_amap_lng = await convert_to_amap_coord(destination_lat, destination_lng, coordsys)
+    origin_amap_lat, origin_amap_lng = await convert_to_amap_coord(origin_lat, origin_lng, origin_coordsys)
+    dest_amap_lat, dest_amap_lng = await convert_to_amap_coord(destination_lat, destination_lng, destination_coordsys)
     data = await amap_get(
         "/direction/walking",
         {
@@ -1993,8 +2061,8 @@ async def plan_walking_route(
     )
     return {
         "input": {
-            "origin": {"lat": origin_lat, "lng": origin_lng, "coordsys": coordsys},
-            "destination": {"lat": destination_lat, "lng": destination_lng, "coordsys": coordsys},
+            "origin": {"lat": origin_lat, "lng": origin_lng, "coordsys": origin_coordsys},
+            "destination": {"lat": destination_lat, "lng": destination_lng, "coordsys": destination_coordsys},
         },
         "amap_origin": {"lat": origin_amap_lat, "lng": origin_amap_lng},
         "amap_destination": {"lat": dest_amap_lat, "lng": dest_amap_lng},
@@ -2002,12 +2070,12 @@ async def plan_walking_route(
     }
 
 
-def enrich_walking_route(route: dict[str, Any], buffer_m: float) -> dict[str, Any]:
+async def enrich_walking_route(route: dict[str, Any], buffer_m: float) -> dict[str, Any]:
     raw_paths = (route.get("raw", {}).get("route") or {}).get("paths") or []
     paths: list[dict[str, Any]] = []
     for index, path in enumerate(raw_paths):
         points = route_points_from_path(path)
-        risk = route_risk_summary(points, buffer_m)
+        risk = await route_risk_summary(points, buffer_m)
         distance_m = int(float(path.get("distance") or 0))
         duration_s = int(float(path.get("duration") or 0))
         paths.append(
@@ -2035,11 +2103,15 @@ def enrich_walking_route(route: dict[str, Any], buffer_m: float) -> dict[str, An
 def route_voice_prompt(best: Optional[dict[str, Any]]) -> str:
     if not best:
         return "未能生成步行路线，请检查起点和终点。"
-    if best["risk"]["high_count"] > 0:
-        return "推荐当前风险最低路线，但沿途有高风险点，请减速并听从盲杖提示。"
-    if best["risk"]["medium_count"] > 0:
-        return "推荐当前路线，沿途存在中风险记录，请谨慎通过。"
-    return "推荐当前路线，历史风险较低，请继续谨慎前进。"
+    risk = best.get("risk", {})
+    high_count = int(risk.get("high_count") or 0)
+    medium_count = int(risk.get("medium_count") or 0)
+    medium_high_count = high_count + medium_count
+    distance_m = int(best.get("distance_m") or 0)
+    distance_text = f"{distance_m}米" if distance_m < 1000 else f"{distance_m / 1000:.1f}公里"
+    if medium_high_count > 0:
+        return f"已确定步行路线，全程约{distance_text}，路线周围8米内有{medium_high_count}个中高风险点，其中高风险{high_count}个，中风险{medium_count}个。"
+    return f"已确定步行路线，全程约{distance_text}，路线周围8米内暂无中高风险点，请继续谨慎前进。"
 
 
 async def generate_route_advice(best_route: Optional[dict[str, Any]], sensor_analysis: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -2147,11 +2219,14 @@ def route_voice_prompt(best: Optional[dict[str, Any]]) -> str:
     if not best:
         return "未能生成步行路线，请检查起点和终点。"
     risk = best.get("risk", {})
-    if risk.get("high_count", 0) > 0:
-        return "已选择综合风险较低路线，但沿途有高风险点，请减速通行。"
-    if risk.get("medium_count", 0) > 0:
-        return "已选择当前推荐路线，沿途有中风险记录，请谨慎通行。"
-    return "已选择历史风险较低路线，请继续谨慎前进。"
+    high_count = int(risk.get("high_count") or 0)
+    medium_count = int(risk.get("medium_count") or 0)
+    medium_high_count = high_count + medium_count
+    distance_m = int(best.get("distance_m") or 0)
+    distance_text = f"{distance_m}米" if distance_m < 1000 else f"{distance_m / 1000:.1f}公里"
+    if medium_high_count > 0:
+        return f"已确定步行路线，全程约{distance_text}，路线周围8米内有{medium_high_count}个中高风险点，其中高风险{high_count}个，中风险{medium_count}个。"
+    return f"已确定步行路线，全程约{distance_text}，路线周围8米内暂无中高风险点，请继续谨慎前进。"
 
 
 def parse_route_text(text: str) -> tuple[Optional[str], Optional[str]]:
@@ -2315,14 +2390,18 @@ async def resolve_route_endpoint(request: MapRouteRequest) -> tuple[float, float
     if (origin_lat is None or origin_lng is None) and request.origin_text:
         origin_meta = await geocode_address(request.origin_text, request.city)
         origin_lat, origin_lng = origin_meta["lat"], origin_meta["lng"]
+    elif origin_lat is not None and origin_lng is not None:
+        origin_meta = {"source": "request_coordinate", "coordsys": request.coordsys}
     if (dest_lat is None or dest_lng is None) and request.destination_text:
         dest_meta = await geocode_address(request.destination_text, request.city)
         dest_lat, dest_lng = dest_meta["lat"], dest_meta["lng"]
+    elif dest_lat is not None and dest_lng is not None:
+        dest_meta = {"source": "request_coordinate", "coordsys": request.coordsys}
     if (origin_lat is None or origin_lng is None) and request.device_id:
         latest = latest_location_for_device(request.device_id)
         if latest:
             origin_lat, origin_lng = float(latest["lat"]), float(latest["lng"])
-            origin_meta = {"source": "latest_device_location", "device_id": request.device_id}
+            origin_meta = {"source": "latest_device_location", "device_id": request.device_id, "coordsys": request.coordsys}
     if origin_lat is None or origin_lng is None:
         raise HTTPException(status_code=400, detail="origin coordinate, origin_text, or device latest location is required")
     if dest_lat is None or dest_lng is None:
@@ -2991,8 +3070,31 @@ async def map_geocode(
 @app.post("/api/navigation/risk-aware-route")
 async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
     origin_lat, origin_lng, dest_lat, dest_lng, resolved = await resolve_route_endpoint(request)
-    route = await plan_walking_route(origin_lat, origin_lng, dest_lat, dest_lng, request.coordsys)
-    enriched = enrich_walking_route(route, request.route_buffer_m)
+    origin_coordsys = str(resolved.get("origin", {}).get("coordsys") or request.coordsys)
+    dest_coordsys = str(resolved.get("destination", {}).get("coordsys") or request.coordsys)
+    origin_amap_lat, origin_amap_lng = await convert_to_amap_coord(origin_lat, origin_lng, origin_coordsys)
+    dest_amap_lat, dest_amap_lng = await convert_to_amap_coord(dest_lat, dest_lng, dest_coordsys)
+    straight_distance_m = haversine_m(origin_amap_lat, origin_amap_lng, dest_amap_lat, dest_amap_lng)
+    if straight_distance_m > WALKING_NAVIGATION_MAX_DISTANCE_M:
+        voice_prompt = "目的地超过3公里，当前仅支持3公里内的步行导航。请换一个更近的目的地。"
+        return {
+            "routes": [],
+            "best_route": None,
+            "route_count": 0,
+            "provider": "amap_web_service",
+            "navigation_mode": "walking",
+            "navigation_status": "out_of_walking_range",
+            "walking_max_distance_m": WALKING_NAVIGATION_MAX_DISTANCE_M,
+            "straight_distance_m": round(straight_distance_m, 1),
+            "resolved": resolved,
+            "origin": {"lat": origin_lat, "lng": origin_lng, "coordsys": origin_coordsys},
+            "destination": {"lat": dest_lat, "lng": dest_lng, "coordsys": dest_coordsys},
+            "amap_origin": {"lat": origin_amap_lat, "lng": origin_amap_lng},
+            "amap_destination": {"lat": dest_amap_lat, "lng": dest_amap_lng},
+            "voice_prompt": voice_prompt,
+        }
+    route = await plan_walking_route(origin_lat, origin_lng, dest_lat, dest_lng, origin_coordsys, dest_coordsys)
+    enriched = await enrich_walking_route(route, request.route_buffer_m)
     sensor_analysis = None
     if request.sensor_frame:
         history = nearby_summary(origin_lat, origin_lng, request.risk_radius_m)
@@ -3001,19 +3103,24 @@ async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
     return {
         **enriched,
         "provider": "amap_web_service",
+        "navigation_mode": "walking",
+        "navigation_status": "ready",
+        "walking_max_distance_m": WALKING_NAVIGATION_MAX_DISTANCE_M,
+        "straight_distance_m": round(straight_distance_m, 1),
         "resolved": resolved,
         "origin": route["input"]["origin"],
         "destination": route["input"]["destination"],
         "amap_origin": route["amap_origin"],
         "amap_destination": route["amap_destination"],
         "risk_method": {
-            "name": "sensor_history_route_score_v1",
-            "description": "route score = nearby stored risk proximity + walking cost; lower is safer",
+            "name": "active_risk_points_route_buffer_v2",
+            "description": "active risk points within the route polyline buffer are counted; lower combined score is safer",
             "route_buffer_m": request.route_buffer_m,
+            "counted_levels": ["medium", "high"],
         },
         "sensor_analysis": sensor_analysis,
         "llm_advice": llm_advice,
-        "voice_prompt": llm_advice.get("advice") or enriched.get("voice_prompt"),
+        "voice_prompt": enriched.get("voice_prompt") or llm_advice.get("advice"),
     }
 
 
