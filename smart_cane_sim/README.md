@@ -27,8 +27,10 @@ http://127.0.0.1:8000
 
 ```bash
 cd smart_cane_sim
-python3 esp32_simulator.py
+python3 esp32_simulator.py --allow-simulation
 ```
+
+接入真实硬件后不要启动这个模拟器；它会持续写入测试风险事件，影响真实地图和路线风险统计。
 
 手机需要和电脑在同一个网络下，打开：
 

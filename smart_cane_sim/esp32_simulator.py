@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import argparse
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -96,6 +97,19 @@ def seed_location() -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="ESP32-C5 risk event simulator")
+    parser.add_argument(
+        "--allow-simulation",
+        action="store_true",
+        help="explicitly allow fake risk-event uploads; keep unset for real-device testing",
+    )
+    args = parser.parse_args()
+    if not args.allow_simulation:
+        parser.error(
+            "simulator uploads are disabled by default for real-device testing. "
+            "Pass --allow-simulation only when you intentionally want fake risk data."
+        )
+
     print(f"ESP32-C5 simulator posting to {BASE_URL}")
     print("Press Ctrl+C to stop.")
     seed_location()

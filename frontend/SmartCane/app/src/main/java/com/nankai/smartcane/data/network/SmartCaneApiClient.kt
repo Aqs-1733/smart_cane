@@ -585,12 +585,17 @@ object SmartCaneApiClient {
     suspend fun postVoiceCommandAudio(
         deviceId: String,
         audioFile: File,
+        currentLatitude: Double?,
+        currentLongitude: Double?,
         language: String? = "zh"
     ): ApiResult<VoiceCommandDto> = withContext(Dispatchers.IO) {
         try {
             val fields = buildMap {
                 put("device_id", deviceId)
                 if (!language.isNullOrBlank()) put("language", language)
+                currentLatitude?.let { put("current_lat", it.toString()) }
+                currentLongitude?.let { put("current_lng", it.toString()) }
+                put("coordsys", "gps")
             }
             ApiResult.Success(
                 postMultipart(

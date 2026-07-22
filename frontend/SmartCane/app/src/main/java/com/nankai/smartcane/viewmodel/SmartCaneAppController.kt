@@ -969,7 +969,8 @@ class SmartCaneAppController private constructor(
         scope.launch {
             _uiState.update { it.copy(voiceState = VoiceState.Speaking, message = message, voiceTranscript = "\u6b63\u5728\u4e0a\u4f20\u5230\u540e\u7aef\u8bc6\u522b\u2026") }
             val deviceId = _uiState.value.currentRelation?.caneDevice?.deviceId ?: DemoData.defaultCane.deviceId
-            when (val result = SmartCaneApiClient.postVoiceCommandAudio(deviceId, file)) {
+            val location = currentPhoneLocation()
+            when (val result = SmartCaneApiClient.postVoiceCommandAudio(deviceId, file, location?.latitude, location?.longitude)) {
                 is ApiResult.Success -> {
                     val transcript = result.data.transcript.ifBlank { "\u5df2\u6536\u5230\u8bed\u97f3" }
                     _uiState.update { it.copy(voiceState = VoiceState.Idle, message = "\u4f60\u8bf4\uff1a$transcript", voiceTranscript = transcript) }
