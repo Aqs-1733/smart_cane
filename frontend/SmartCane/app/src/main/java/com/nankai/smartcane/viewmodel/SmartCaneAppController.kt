@@ -32,6 +32,7 @@ import com.nankai.smartcane.data.model.RelationStatus
 import com.nankai.smartcane.data.model.UserProfile
 import com.nankai.smartcane.data.model.UserRole
 import com.nankai.smartcane.data.network.ApiResult
+import com.nankai.smartcane.data.network.DeviceStateDto
 import com.nankai.smartcane.data.network.EmergencyAlertDto
 import com.nankai.smartcane.data.network.LocationUploadDto
 import com.nankai.smartcane.data.network.NearbyRiskWarningDto
@@ -80,6 +81,7 @@ class SmartCaneAppController private constructor(
     private var companionPollingJob: Job? = null
     private var alertPollingJob: Job? = null
     private var nearbyRiskPollingJob: Job? = null
+    private var hardwareRiskPollingJob: Job? = null
     private var sosAlarmJob: Job? = null
     private var blindRiskMonitorJob: Job? = null
     private var locationUpdatesActive = false
@@ -88,6 +90,8 @@ class SmartCaneAppController private constructor(
     private var latestContinuousLocation: Location? = null
     private var activeTtsUtteranceId: String? = null
     private var lastAlertId: Int = 0
+    private var lastHardwareRiskSignature: String? = null
+    private var lastHardwareRiskSpokenAt: Long = 0L
     private val announcedNearbyRiskIds = mutableSetOf<Int>()
     private val nearbyRiskSpeechTimes: MutableMap<Int, Long> = mutableMapOf()
 
@@ -450,6 +454,7 @@ class SmartCaneAppController private constructor(
 
     fun startAlertPolling() {
         startNearbyRiskPolling()
+        startHardwareRiskPolling()
         if (alertPollingJob?.isActive == true) return
         alertPollingJob = scope.launch {
             while (true) {
@@ -497,6 +502,98 @@ class SmartCaneAppController private constructor(
         alertPollingJob?.cancel()
         alertPollingJob = null
         stopNearbyRiskPolling()
+        stopHardwareRiskPolling()
+    }
+
+    private fun startHardwareRiskPolling() {
+        if (hardwareRiskPollingJob?.isActive == true) return
+        hardwareRiskPollingJob = scope.launch {
+            while (true) {
+                val state = _uiState.value
+                if (state.currentMode != AppMode.Blind) {
+                    delay(1_500L)
+                    continue
+                }
+
+                val deviceId = state.currentRelation?.caneDevice?.deviceId
+                    ?: state.storedState.relationId?.let { DemoData.defaultCane.deviceId }
+                    ?: DemoData.defaultCane.deviceId
+                when (val result = SmartCaneApiClient.getLatestDeviceState(deviceId)) {
+                    is ApiResult.Success -> result.data.state?.let { maybeSpeakHardwareRisk(it) }
+                    is ApiResult.Failure -> Unit
+                }
+                delay(1_000L)
+            }
+        }
+    }
+
+    private fun stopHardwareRiskPolling() {
+        hardwareRiskPollingJob?.cancel()
+        hardwareRiskPollingJob = null
+    }
+
+    private fun maybeSpeakHardwareRisk(state: DeviceStateDto) {
+        if (!state.online) return
+        if (_uiState.value.voiceState != VoiceState.Idle) return
+        if (isNonHardwareSource(state.source)) return
+
+        val level = state.riskLevel.lowercase(Locale.US)
+        if (level !in setOf("medium", "high")) return
+        val riskType = state.riskType.lowercase(Locale.US)
+        if (riskType == "none") return
+
+        val prompt = hardwareRiskPrompt(state) ?: state.voicePrompt.takeIf { it.isNotBlank() } ?: return
+        val signature = listOf(
+            state.updatedAt,
+            state.source,
+            riskType,
+            level,
+            state.frontCm,
+            state.leftCm,
+            state.rightCm,
+            state.downCm
+        ).joinToString("|")
+        val now = System.currentTimeMillis()
+        if (signature == lastHardwareRiskSignature && now - lastHardwareRiskSpokenAt < 4_000L) return
+        lastHardwareRiskSignature = signature
+        lastHardwareRiskSpokenAt = now
+
+        _uiState.update { it.copy(message = "硬件实时风险：${riskLevelLabel(level)}", voiceTranscript = prompt) }
+        speakText(prompt)
+    }
+
+    private fun isNonHardwareSource(source: String): Boolean {
+        val normalized = source.lowercase(Locale.US)
+        return normalized.contains("mock") ||
+            normalized.contains("simulator") ||
+            normalized.contains("simulation") ||
+            normalized.contains("fake") ||
+            normalized.contains("demo")
+    }
+
+    private fun hardwareRiskPrompt(state: DeviceStateDto): String? {
+        val level = riskLevelLabel(state.riskLevel)
+        val riskType = state.riskType.lowercase(Locale.US)
+        return when {
+            riskType.contains("front") -> state.frontCm?.let { "注意${level}风险，前方${it}厘米有障碍。" }
+            riskType.contains("left") -> state.leftCm?.let { "注意${level}风险，左侧${it}厘米有障碍，请向右保持距离。" }
+            riskType.contains("right") -> state.rightCm?.let { "注意${level}风险，右侧${it}厘米有障碍，请向左保持距离。" }
+            riskType.contains("ground") || riskType.contains("down") || riskType.contains("drop") ->
+                state.downCm?.let { "注意${level}风险，下方${it}厘米可能有台阶或坑洼。" }
+            riskType.contains("obstacle") -> nearestHardwareObstaclePrompt(state, level)
+            else -> state.voicePrompt.takeIf { it.isNotBlank() }
+        }
+    }
+
+    private fun nearestHardwareObstaclePrompt(state: DeviceStateDto, level: String): String? {
+        val candidates = listOfNotNull(
+            state.frontCm?.let { "前方" to it },
+            state.leftCm?.let { "左侧" to it },
+            state.rightCm?.let { "右侧" to it },
+            state.downCm?.let { "下方" to it }
+        )
+        val nearest = candidates.minByOrNull { it.second } ?: return null
+        return "注意${level}风险，${nearest.first}${nearest.second}厘米有障碍。"
     }
 
     private fun startNearbyRiskPolling() {
