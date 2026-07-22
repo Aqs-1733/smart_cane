@@ -11,7 +11,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,6 +42,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -59,6 +61,7 @@ import com.nankai.smartcane.data.network.EmergencyAlertDto
 import com.nankai.smartcane.ui.design.SmartCaneColors
 import com.nankai.smartcane.viewmodel.SosActionState
 import com.nankai.smartcane.viewmodel.VoiceState
+import kotlinx.coroutines.withTimeoutOrNull
 
 @Composable
 fun BlindHomeScreen(
@@ -185,13 +188,15 @@ private fun VoiceOrb(
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit
 ) {
-    val latestState by rememberUpdatedState(state)
     val label = when (state) {
         VoiceState.Idle -> "按住说话"
         VoiceState.Listening -> "正在录音"
         VoiceState.Processing -> "正在识别"
         VoiceState.Speaking -> "正在播报"
     }
+    val currentState by rememberUpdatedState(state)
+    val currentOnPressStart by rememberUpdatedState(onPressStart)
+    val currentOnPressEnd by rememberUpdatedState(onPressEnd)
     Box(
         modifier = Modifier
             .size(218.dp)
@@ -199,22 +204,26 @@ private fun VoiceOrb(
             .clip(CircleShape)
             .background(Brush.radialGradient(listOf(Color(0xFFA5B4FC), Color(0xFF6366F1), Color(0xFF312E81))))
             .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        if (latestState == VoiceState.Idle) {
-                            onPressStart()
-                            try {
-                                tryAwaitRelease()
-                            } finally {
-                                onPressEnd()
-                            }
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    val releasedBeforeLongPress = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                        waitForUpOrCancellation()
+                    }
+                    if (releasedBeforeLongPress == null && currentState == VoiceState.Idle) {
+                        var started = false
+                        try {
+                            currentOnPressStart()
+                            started = true
+                            waitForUpOrCancellation()
+                        } finally {
+                            if (started) currentOnPressEnd()
                         }
                     }
-                )
+                }
             }
             .semantics {
                 role = Role.Button
-                contentDescription = if (state == VoiceState.Idle) "按住说话，松开结束" else "语音处理中，按钮暂不可用"
+                contentDescription = if (state == VoiceState.Idle) "语音按钮，按住开始说话，松开结束" else "语音处理中，按钮暂不可用"
                 stateDescription = label
             },
         contentAlignment = Alignment.Center
@@ -226,7 +235,6 @@ private fun VoiceOrb(
         }
     }
 }
-
 @Composable
 private fun SoundWave(active: Boolean) {
     val transition = rememberInfiniteTransition(label = "voice-wave")

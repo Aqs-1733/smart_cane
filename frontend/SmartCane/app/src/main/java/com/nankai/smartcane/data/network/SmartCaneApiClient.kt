@@ -25,6 +25,50 @@ sealed interface ApiResult<out T> {
     data class Failure(val message: String) : ApiResult<Nothing>
 }
 
+data class AuthUserDto(
+    val userId: String,
+    val account: String,
+    val displayName: String,
+    val role: String
+)
+
+data class AuthResponseDto(
+    val success: Boolean,
+    val message: String,
+    val user: AuthUserDto?
+)
+
+data class DeviceStateDto(
+    val deviceId: String,
+    val updatedAt: String,
+    val online: Boolean,
+    val latitude: Double?,
+    val longitude: Double?,
+    val battery: Int?,
+    val frontCm: Int?,
+    val leftCm: Int?,
+    val rightCm: Int?,
+    val downCm: Int?,
+    val riskType: String,
+    val riskLevel: String,
+    val riskScore: Double,
+    val voicePrompt: String,
+    val source: String,
+    val deviceName: String = ""
+)
+
+data class DeviceStateResponseDto(val success: Boolean, val found: Boolean, val state: DeviceStateDto?)
+
+data class CollaborationOverviewDto(
+    val deviceCount: Int,
+    val onlineCount: Int,
+    val riskPointCount: Int,
+    val highRiskCount: Int,
+    val mediumRiskCount: Int,
+    val points: List<LatestRiskEventDto>,
+    val devices: List<DeviceStateDto>
+)
+
 data class LatestRiskEventDto(
     val id: Int,
     val deviceId: String,
@@ -51,7 +95,11 @@ data class EmergencyAlertDto(
     val voicePrompt: String,
     val latitude: Double?,
     val longitude: Double?,
-    val timestamp: String
+    val timestamp: String,
+    val relativeDirection: String = "front",
+    val relativeDirectionText: String = "前方",
+    val confidence: Double? = null,
+    val reportCount: Int? = null
 )
 
 data class ServerStatusDto(val online: Boolean, val message: String, val deviceCount: Int)
@@ -65,6 +113,17 @@ data class DeviceDto(
 )
 
 data class SosRequestDto(val deviceId: String, val latitude: Double?, val longitude: Double?, val message: String)
+
+data class LocationUploadDto(
+    val deviceId: String,
+    val latitude: Double,
+    val longitude: Double,
+    val source: String = "android_app",
+    val provider: String? = null,
+    val quality: String? = null,
+    val accuracyM: Float? = null,
+    val bearingDeg: Float? = null
+)
 
 data class SosRecordDto(
     val id: Int,
@@ -195,12 +254,69 @@ data class VoiceCommandDto(
     val voicePrompt: String,
     val routeCount: Int,
     val provider: String,
-    val model: String
+    val model: String,
+    val reply: String = voicePrompt
+)
+
+data class NearbyRiskWarningDto(
+    val eventId: Int,
+    val deviceId: String,
+    val riskType: String,
+    val riskLevel: String,
+    val distanceM: Double,
+    val message: String,
+    val voicePrompt: String,
+    val latitude: Double?,
+    val longitude: Double?,
+    val timestamp: String,
+    val relativeDirection: String = "front",
+    val relativeDirectionText: String = "前方",
+    val confidence: Double? = null,
+    val reportCount: Int? = null
 )
 
 object SmartCaneApiClient {
     private const val CONNECT_TIMEOUT_MS = 5_000
     private const val READ_TIMEOUT_MS = 8_000
+
+    suspend fun login(account: String, password: String): ApiResult<AuthResponseDto> = withContext(Dispatchers.IO) {
+        try {
+            val payload = JSONObject().put("account", account).put("password", password)
+            ApiResult.Success(postJson("/api/auth/login", payload).toAuthResponseDto())
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
+    suspend fun register(account: String, password: String, displayName: String, role: String): ApiResult<AuthResponseDto> = withContext(Dispatchers.IO) {
+        try {
+            val payload = JSONObject()
+                .put("account", account)
+                .put("password", password)
+                .put("displayName", displayName)
+                .put("role", role)
+            ApiResult.Success(postJson("/api/auth/register", payload).toAuthResponseDto())
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
+    suspend fun getLatestDeviceState(deviceId: String? = null): ApiResult<DeviceStateResponseDto> = withContext(Dispatchers.IO) {
+        try {
+            val path = if (deviceId.isNullOrBlank()) "/api/device-state/latest" else "/api/device-state/latest?device_id=${deviceId.urlEncode()}"
+            ApiResult.Success(getJson(path).toDeviceStateResponseDto())
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
+    suspend fun getCollaborationOverview(): ApiResult<CollaborationOverviewDto> = withContext(Dispatchers.IO) {
+        try {
+            ApiResult.Success(getJson("/api/collaboration/overview").toCollaborationOverviewDto())
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
 
     suspend fun getLatestEvents(): ApiResult<List<LatestRiskEventDto>> = withContext(Dispatchers.IO) {
         try {
@@ -251,6 +367,33 @@ object SmartCaneApiClient {
     suspend fun postSos(request: SosRequestDto): ApiResult<SosResponseDto> = withContext(Dispatchers.IO) {
         try {
             ApiResult.Success(postJson("/sos", request.toJson()).toSosResponseDto())
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
+    suspend fun postLocation(request: LocationUploadDto): ApiResult<Unit> = withContext(Dispatchers.IO) {
+        try {
+            postJson("/api/locations", request.toJson())
+            ApiResult.Success(Unit)
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
+    suspend fun getNearbyRiskWarning(
+        latitude: Double,
+        longitude: Double,
+        radiusM: Int = 50,
+        minLevel: String = "medium",
+        bearingDeg: Float? = null
+    ): ApiResult<NearbyRiskWarningDto?> = withContext(Dispatchers.IO) {
+        try {
+            val path = buildString {
+                append("/api/risks/nearby-warning?lat=$latitude&lng=$longitude&radius=$radiusM&min_level=${minLevel.urlEncode()}")
+                if (bearingDeg != null) append("&bearing_deg=$bearingDeg")
+            }
+            ApiResult.Success(getJson(path).toNearbyRiskWarningDtoOrNull())
         } catch (exception: Exception) {
             ApiResult.Failure(exception.toUserMessage())
         }
@@ -439,6 +582,31 @@ object SmartCaneApiClient {
         }
     }
 
+    suspend fun postVoiceCommandAudio(
+        deviceId: String,
+        audioFile: File,
+        language: String? = "zh"
+    ): ApiResult<VoiceCommandDto> = withContext(Dispatchers.IO) {
+        try {
+            val fields = buildMap {
+                put("device_id", deviceId)
+                if (!language.isNullOrBlank()) put("language", language)
+            }
+            ApiResult.Success(
+                postMultipart(
+                    path = "/api/voice/command",
+                    fields = fields,
+                    fileFieldName = "file",
+                    file = audioFile,
+                    fileName = "voice_${System.currentTimeMillis()}.m4a",
+                    contentType = "audio/mp4"
+                ).toVoiceCommandDto()
+            )
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
     private fun getJson(path: String): JSONObject {
         val connection = (URL(ApiConfig.BASE_URL + path).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
@@ -504,6 +672,7 @@ object SmartCaneApiClient {
         }
     }
 
+
     private fun deleteJson(path: String): JSONObject {
         val connection = (URL(ApiConfig.BASE_URL + path).openConnection() as HttpURLConnection).apply {
             requestMethod = "DELETE"
@@ -534,6 +703,17 @@ object SmartCaneApiClient {
         put("message", message)
     }
 
+    private fun LocationUploadDto.toJson(): JSONObject = JSONObject().apply {
+        put("device_id", deviceId)
+        put("lat", latitude)
+        put("lng", longitude)
+        put("source", source)
+        put("provider", provider ?: JSONObject.NULL)
+        put("quality", quality ?: JSONObject.NULL)
+        put("accuracy_m", accuracyM ?: JSONObject.NULL)
+        put("bearing_deg", bearingDeg ?: JSONObject.NULL)
+    }
+
     private fun SensorFrameRequestDto.toJson(): JSONObject = JSONObject().apply {
         put("device_id", deviceId)
         put("lat", latitude ?: JSONObject.NULL)
@@ -562,6 +742,58 @@ object SmartCaneApiClient {
         put("right_mm", rightMm ?: JSONObject.NULL)
         put("down_mm", downMm ?: JSONObject.NULL)
         put("source", "android_frontend_advice")
+    }
+
+    private fun JSONObject.toAuthUserDto(): AuthUserDto = AuthUserDto(
+        userId = optString("userId", optString("user_id")),
+        account = optString("account"),
+        displayName = optString("displayName", optString("display_name", optString("account"))),
+        role = optString("role", "blind")
+    )
+
+    private fun JSONObject.toAuthResponseDto(): AuthResponseDto = AuthResponseDto(
+        success = optBoolean("success"),
+        message = optString("message"),
+        user = optJSONObject("user")?.toAuthUserDto()
+    )
+
+    private fun JSONObject.toDeviceStateDto(): DeviceStateDto = DeviceStateDto(
+        deviceId = optString("deviceId", optString("device_id", "")),
+        updatedAt = optString("updatedAt", optString("updated_at", "")),
+        online = optBoolean("online", true),
+        latitude = nullableDouble("latitude") ?: nullableDouble("lat"),
+        longitude = nullableDouble("longitude") ?: nullableDouble("lng"),
+        battery = nullableInt("battery"),
+        frontCm = nullableInt("frontCm") ?: nullableInt("front_cm"),
+        leftCm = nullableInt("leftCm") ?: nullableInt("left_cm"),
+        rightCm = nullableInt("rightCm") ?: nullableInt("right_cm"),
+        downCm = nullableInt("downCm") ?: nullableInt("down_cm"),
+        riskType = optString("riskType", optString("risk_type", "none")),
+        riskLevel = optString("riskLevel", optString("risk_level", "low")),
+        riskScore = optDouble("riskScore", optDouble("risk_score", 0.0)),
+        voicePrompt = optString("voicePrompt", optString("voice_prompt", "")),
+        source = optString("source", "unknown"),
+        deviceName = optString("deviceName", optString("device_name", optString("name", "")))
+    )
+
+    private fun JSONObject.toDeviceStateResponseDto(): DeviceStateResponseDto = DeviceStateResponseDto(
+        success = optBoolean("success"),
+        found = optBoolean("found"),
+        state = optJSONObject("state")?.toDeviceStateDto()
+    )
+
+    private fun JSONObject.toCollaborationOverviewDto(): CollaborationOverviewDto {
+        val pointsJson = optJSONArray("points") ?: JSONArray()
+        val devicesJson = optJSONArray("devices") ?: JSONArray()
+        return CollaborationOverviewDto(
+            deviceCount = optInt("deviceCount"),
+            onlineCount = optInt("onlineCount"),
+            riskPointCount = optInt("riskPointCount"),
+            highRiskCount = optInt("highRiskCount"),
+            mediumRiskCount = optInt("mediumRiskCount"),
+            points = List(pointsJson.length()) { index -> pointsJson.getJSONObject(index).toLatestRiskEventDto() },
+            devices = List(devicesJson.length()) { index -> devicesJson.getJSONObject(index).toDeviceStateDto() }
+        )
     }
 
     private fun JSONObject.toLatestRiskEventDto(): LatestRiskEventDto {
@@ -602,6 +834,28 @@ object SmartCaneApiClient {
         longitude = nullableDouble("longitude") ?: nullableDouble("lng"),
         timestamp = optString("timestamp")
     )
+
+    private fun JSONObject.toNearbyRiskWarningDtoOrNull(): NearbyRiskWarningDto? {
+        if (!optBoolean("found", false)) return null
+        val warning = optJSONObject("warning") ?: return null
+        val messageValue = warning.optString("message")
+        return NearbyRiskWarningDto(
+            eventId = warning.optInt("eventId", warning.optInt("id")),
+            deviceId = warning.optString("deviceId", warning.optString("device_id", "")),
+            riskType = warning.optString("riskType", warning.optString("risk_type", "none")),
+            riskLevel = warning.optString("riskLevel", warning.optString("risk_level", "low")),
+            distanceM = warning.optDouble("distanceM", warning.optDouble("distance_m", 0.0)),
+            message = messageValue,
+            voicePrompt = warning.optString("voicePrompt", warning.optString("voice_prompt", messageValue)),
+            latitude = warning.nullableDouble("latitude") ?: warning.nullableDouble("lat"),
+            longitude = warning.nullableDouble("longitude") ?: warning.nullableDouble("lng"),
+            timestamp = warning.optString("timestamp"),
+            relativeDirection = warning.optString("relativeDirection", "front"),
+            relativeDirectionText = warning.optString("relativeDirectionText", "前方"),
+            confidence = warning.nullableDouble("confidence"),
+            reportCount = warning.nullableInt("reportCount") ?: warning.nullableInt("report_count")
+        )
+    }
 
     private fun JSONObject.toServerStatusDto(): ServerStatusDto = ServerStatusDto(
         online = optBoolean("online"),
@@ -755,7 +1009,8 @@ object SmartCaneApiClient {
             voicePrompt = optString("voice_prompt", optString("voicePrompt", optString("reply", "已收到语音指令"))),
             routeCount = optInt("route_count", optInt("routeCount")),
             provider = stt?.optString("provider").orEmpty(),
-            model = stt?.optString("model").orEmpty().ifBlank { bestRoute?.optString("model").orEmpty() }
+            model = stt?.optString("model").orEmpty().ifBlank { bestRoute?.optString("model").orEmpty() },
+            reply = optString("reply", optString("voice_prompt", optString("voicePrompt", "已收到语音指令")))
         )
     }
 
@@ -769,11 +1024,15 @@ object SmartCaneApiClient {
     private fun extractError(body: String, code: Int): String {
         return runCatching {
             val json = JSONObject(body.ifBlank { "{}" })
-            json.optString("error")
+            val raw = json.optString("error")
                 .ifBlank { json.optString("detail") }
                 .ifBlank { json.optString("message") }
-                .ifBlank { "HTTP $code" }
-        }.getOrDefault("HTTP $code")
+            when {
+                code == 404 || raw.equals("Not Found", ignoreCase = true) -> "?????????????????????"
+                raw.isNotBlank() -> raw
+                else -> "HTTP $code"
+            }
+        }.getOrDefault(if (code == 404) "?????????????????????" else "HTTP $code")
     }
 
     private fun String.urlEncode(): String = URLEncoder.encode(this, Charsets.UTF_8.name())
