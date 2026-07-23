@@ -545,7 +545,7 @@ class SmartCaneAppController private constructor(
         if (isNonHardwareSource(state.source)) return
 
         val level = state.riskLevel.lowercase(Locale.US)
-        if (level !in setOf("medium", "high")) return
+        if (level !in setOf("low", "medium", "high")) return
         val riskType = state.riskType.lowercase(Locale.US)
         if (riskType == "none") return
 
@@ -561,7 +561,8 @@ class SmartCaneAppController private constructor(
             state.downCm
         ).joinToString("|")
         val now = System.currentTimeMillis()
-        if (signature == lastHardwareRiskSignature && now - lastHardwareRiskSpokenAt < 4_000L) return
+        val minIntervalMs = if (level == "low") 10_000L else 4_000L
+        if (signature == lastHardwareRiskSignature && now - lastHardwareRiskSpokenAt < minIntervalMs) return
         lastHardwareRiskSignature = signature
         lastHardwareRiskSpokenAt = now
 

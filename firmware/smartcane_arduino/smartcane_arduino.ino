@@ -597,7 +597,7 @@ static void monitorCompanionAlerts(const RiskState &risk) {
       obstacleStartedMs = now;
     } else if (obstacleStartedMs != 0 &&
                now - obstacleStartedMs >= SMARTCANE_COMPANION_OBSTACLE_HOLD_MS) {
-      uploadCompanionAlert("prolonged_obstacle", RISK_HIGH, "same_obstacle_persisted");
+      uploadCompanionAlert("prolonged_obstacle", RISK_MEDIUM, "same_obstacle_persisted");
       obstacleStartedMs = now;
     }
   } else {
@@ -621,7 +621,7 @@ static void monitorCompanionAlerts(const RiskState &risk) {
     int dropCm = approachStartFrontCm - distances.frontCm;
     if (dropCm >= SMARTCANE_COMPANION_APPROACH_DELTA_CM) {
       uploadCompanionAlert("approaching_obstacle",
-                           distances.frontCm < SMARTCANE_FRONT_DANGER_CM ? RISK_HIGH : RISK_MEDIUM,
+                           RISK_MEDIUM,
                            "front_distance_decreasing");
     }
     approachWindowStartMs = now;
