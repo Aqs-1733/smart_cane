@@ -10,10 +10,6 @@ import secrets
 import sqlite3
 import tempfile
 import uuid
-import asyncio
-import base64
-import io
-import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -32,24 +28,15 @@ LEVEL_RANK = {"low": 0, "medium": 1, "high": 2}
 DEVICE_OFFLINE_SECONDS = 60
 AMAP_BASE_URL = "https://restapi.amap.com/v3"
 
-FRONT_WARN_CM = 110
-FRONT_DANGER_CM = 35
-SIDE_SAFE_CM = 60
-SIDE_NEAR_CM = 20
-SIDE_DANGER_CM = 12
-SIDE_BLOCKED_CM = 18
-GROUND_BASE_CM = 55
-GROUND_DROP_THRESHOLD_CM = 95
-DOWN_OBSTACLE_CM = 20
-DOWN_STEP_EDGE_MIN_CM = 45
-DOWN_STEP_EDGE_MAX_CM = 90
+FRONT_WARN_CM = 120
+FRONT_DANGER_CM = 60
+SIDE_SAFE_CM = 90
+SIDE_NEAR_CM = 55
+GROUND_BASE_CM = 45
+GROUND_DROP_THRESHOLD_CM = 45
 DEFAULT_NEARBY_RADIUS_M = 80.0
-ROUTE_RISK_BUFFER_M = 8.0
-WALKING_NAVIGATION_MAX_DISTANCE_M = 3000.0
+ROUTE_RISK_BUFFER_M = 35.0
 RISK_POINT_CLUSTER_RADIUS_M = 12.0
-LEGACY_SIM_POINT_LAT = 31.2304
-LEGACY_SIM_POINT_LNG = 121.4737
-LEGACY_SIM_POINT_RADIUS_M = 80.0
 RISK_POINT_TRANSIENT_TTL_SECONDS = 2 * 60 * 60
 RISK_POINT_FIXED_TTL_SECONDS = 7 * 24 * 60 * 60
 RISK_POINT_EMERGENCY_TTL_SECONDS = 30 * 60
@@ -103,12 +90,8 @@ HARDWARE_PROFILE: dict[str, Any] = {
         "front_danger": FRONT_DANGER_CM,
         "side_safe": SIDE_SAFE_CM,
         "side_near": SIDE_NEAR_CM,
-        "side_danger": SIDE_DANGER_CM,
         "ground_base": GROUND_BASE_CM,
         "ground_drop_threshold": GROUND_DROP_THRESHOLD_CM,
-        "down_obstacle": DOWN_OBSTACLE_CM,
-        "down_step_edge_min": DOWN_STEP_EDGE_MIN_CM,
-        "down_step_edge_max": DOWN_STEP_EDGE_MAX_CM,
     },
 }
 
@@ -170,6 +153,10 @@ class AdviceRequest(BaseModel):
     left_cm: Optional[int] = None
     right_cm: Optional[int] = None
     down_cm: Optional[int] = None
+    front_valid: Optional[bool] = None
+    left_valid: Optional[bool] = None
+    right_valid: Optional[bool] = None
+    down_valid: Optional[bool] = None
     accuracy_m: Optional[float] = None
     location_quality: Optional[str] = None
     extra: Optional[str] = None
@@ -191,6 +178,10 @@ class AiAdviceCompatRequest(BaseModel):
     left_mm: Optional[int] = None
     right_mm: Optional[int] = None
     down_mm: Optional[int] = None
+    front_valid: Optional[bool] = None
+    left_valid: Optional[bool] = None
+    right_valid: Optional[bool] = None
+    down_valid: Optional[bool] = None
     accuracy_m: Optional[float] = None
     location_quality: Optional[str] = None
     extra: Optional[str] = None
@@ -207,6 +198,10 @@ class AiAdviceCompatRequest(BaseModel):
             left_cm=self.left_cm if self.left_cm is not None else mm_to_cm(self.left_mm),
             right_cm=self.right_cm if self.right_cm is not None else mm_to_cm(self.right_mm),
             down_cm=self.down_cm if self.down_cm is not None else mm_to_cm(self.down_mm),
+            front_valid=self.front_valid,
+            left_valid=self.left_valid,
+            right_valid=self.right_valid,
+            down_valid=self.down_valid,
             accuracy_m=self.accuracy_m,
             location_quality=self.location_quality,
             extra=self.extra,
@@ -224,6 +219,10 @@ class DeepRiskRequest(BaseModel):
     left_cm: Optional[int] = None
     right_cm: Optional[int] = None
     down_cm: Optional[int] = None
+    front_valid: Optional[bool] = None
+    left_valid: Optional[bool] = None
+    right_valid: Optional[bool] = None
+    down_valid: Optional[bool] = None
     accuracy_m: Optional[float] = None
     location_quality: Optional[str] = None
     nearby_radius_m: float = Field(80.0, gt=0, le=5000)
@@ -246,6 +245,10 @@ class SensorFrameCreate(BaseModel):
     left_cm: Optional[int] = Field(None, ge=0, le=450)
     right_cm: Optional[int] = Field(None, ge=0, le=450)
     down_cm: Optional[int] = Field(None, ge=0, le=450)
+    front_valid: Optional[bool] = None
+    left_valid: Optional[bool] = None
+    right_valid: Optional[bool] = None
+    down_valid: Optional[bool] = None
     battery: Optional[float] = Field(None, ge=-1, le=100)
     heading_deg: Optional[float] = Field(None, ge=0, lt=360)
     accel_x_g: Optional[float] = None
@@ -1061,7 +1064,7 @@ def alert_priority(risk_type: str, level: str) -> str:
         return "critical"
     if risk_type == "voice_request":
         return "info"
-    if level == "high":
+    if risk_type == "prolonged_obstacle" or level == "high":
         return "high"
     return "medium"
 
@@ -1122,7 +1125,6 @@ MAPPABLE_RISK_TYPES = {
     "left_obstacle",
     "right_obstacle",
     "ground_drop",
-    "ground_step",
     "down_obstacle",
     "user_mark",
     "history_risk",
@@ -1134,7 +1136,7 @@ MAPPABLE_RISK_TYPES = {
 
 
 def risk_point_ttl_seconds(risk_type: str, level: str) -> int:
-    if risk_type in {"ground_drop", "ground_step", "user_mark", "history_risk"}:
+    if risk_type in {"ground_drop", "user_mark", "history_risk"}:
         return RISK_POINT_FIXED_TTL_SECONDS
     if risk_type in {"sos", "fall_detected"}:
         return RISK_POINT_EMERGENCY_TTL_SECONDS
@@ -1160,24 +1162,11 @@ def risk_point_confidence(level: str, report_count: int, source_count: int) -> f
     return round(min(0.97, 0.32 + level_bonus + report_bonus + source_bonus), 2)
 
 
-def is_legacy_sim_point(lat: float, lng: float) -> bool:
-    return haversine_m(lat, lng, LEGACY_SIM_POINT_LAT, LEGACY_SIM_POINT_LNG) <= LEGACY_SIM_POINT_RADIUS_M
-
-
 def expire_risk_points() -> None:
     with db() as conn:
         conn.execute(
             "UPDATE risk_points SET status = 'expired' WHERE status = 'active' AND expires_at < ?",
             (now_iso(),),
-        )
-        conn.execute(
-            "UPDATE risk_points SET status = 'expired' WHERE status = 'active' AND lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?",
-            (
-                LEGACY_SIM_POINT_LAT - 0.001,
-                LEGACY_SIM_POINT_LAT + 0.001,
-                LEGACY_SIM_POINT_LNG - 0.001,
-                LEGACY_SIM_POINT_LNG + 0.001,
-            ),
         )
 
 
@@ -1197,8 +1186,6 @@ def upsert_risk_point_for_event(event: dict[str, Any]) -> None:
     lat = float(lat)
     lng = float(lng)
     if abs(lat) < 1e-9 and abs(lng) < 1e-9:
-        return
-    if is_legacy_sim_point(lat, lng):
         return
 
     now = event.get("timestamp") or now_iso()
@@ -1549,31 +1536,36 @@ def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+# VL53L1X returns cached/sentinel values around 400 cm when a channel is
+# disconnected, occluded, pointed away from the floor, or otherwise has no
+# trustworthy return.  A 400 cm downward reading should not be interpreted as a
+# four-meter pit by the backend.  Firmware now sends *_valid flags too, but keep
+# this sentinel guard for already-flashed devices and legacy /telemetry clients.
+DOWN_NO_RETURN_SENTINEL_CM = 350
+
+
+def normalized_sensor_request(req: Any) -> Any:
+    updates: dict[str, Any] = {}
+    for name in ("front", "left", "right", "down"):
+        cm_field = f"{name}_cm"
+        valid_field = f"{name}_valid"
+        cm = getattr(req, cm_field, None)
+        valid = getattr(req, valid_field, None)
+        if valid is False or (name == "down" and cm is not None and cm >= DOWN_NO_RETURN_SENTINEL_CM):
+            updates[cm_field] = None
+    if not updates:
+        return req
+    if hasattr(req, "model_copy"):
+        return req.model_copy(update=updates)
+    return req.copy(update=updates)
+
+
 def risk_level_from_score(score: float) -> str:
     if score >= 70:
         return "high"
     if score >= 40:
         return "medium"
     return "low"
-
-
-def risk_level_for_analysis(risk_type: str, score: float) -> str:
-    if risk_type in {"sos", "fall_detected"}:
-        return "high"
-    if risk_type in {"ground_drop", "ground_step", "user_mark"}:
-        return "medium" if score > 0 else "low"
-    if risk_type in {
-        "front_obstacle",
-        "left_obstacle",
-        "right_obstacle",
-        "down_obstacle",
-        "history_risk",
-        "prolonged_obstacle",
-        "approaching_obstacle",
-        "voice_request",
-    }:
-        return "low"
-    return risk_level_from_score(score)
 
 
 def primary_distance_mm(risk_type: str, frame: SensorFrameCreate) -> Optional[int]:
@@ -1583,7 +1575,7 @@ def primary_distance_mm(risk_type: str, frame: SensorFrameCreate) -> Optional[in
         return frame.left_cm * 10
     if risk_type == "right_obstacle" and frame.right_cm is not None:
         return frame.right_cm * 10
-    if risk_type in {"ground_drop", "ground_step", "down_obstacle", "fall_detected"} and frame.down_cm is not None:
+    if risk_type in {"ground_drop", "down_obstacle", "fall_detected"} and frame.down_cm is not None:
         return frame.down_cm * 10
     if risk_type in {"prolonged_obstacle", "approaching_obstacle"} and frame.front_cm is not None:
         return frame.front_cm * 10
@@ -1594,19 +1586,19 @@ def front_score(front_cm: Optional[int]) -> float:
     if front_cm is None:
         return 0.0
     if front_cm < FRONT_DANGER_CM:
-        return clamp(72 + (FRONT_DANGER_CM - front_cm) * 0.35, 72, 90)
+        return clamp(82 + (FRONT_DANGER_CM - front_cm) * 0.35, 82, 98)
     if front_cm < FRONT_WARN_CM:
-        return clamp(10 + (FRONT_WARN_CM - front_cm) * 0.24, 10, 32)
+        return clamp(42 + (FRONT_WARN_CM - front_cm) * 0.55, 42, 78)
     return 0.0
 
 
 def side_score(side_cm: Optional[int]) -> float:
     if side_cm is None:
         return 0.0
-    if side_cm < SIDE_DANGER_CM:
-        return clamp(24 + (SIDE_DANGER_CM - side_cm) * 0.70, 24, 35)
     if side_cm < SIDE_NEAR_CM:
-        return clamp(12 + (SIDE_NEAR_CM - side_cm) * 1.70, 12, 24)
+        return clamp(50 + (SIDE_NEAR_CM - side_cm) * 0.55, 50, 82)
+    if side_cm < SIDE_SAFE_CM:
+        return clamp(25 + (SIDE_SAFE_CM - side_cm) * 0.45, 25, 50)
     return 0.0
 
 
@@ -1615,47 +1607,31 @@ def ground_score(down_cm: Optional[int]) -> float:
         return 0.0
     drop_threshold = GROUND_BASE_CM + GROUND_DROP_THRESHOLD_CM
     if down_cm > drop_threshold:
-        return clamp(48 + (down_cm - drop_threshold) * 0.12, 48, 68)
-    return 0.0
-
-
-def down_obstacle_score(down_cm: Optional[int]) -> float:
-    if down_cm is None:
-        return 0.0
-    if down_cm < DOWN_OBSTACLE_CM:
-        return clamp(12 + (DOWN_OBSTACLE_CM - down_cm) * 0.80, 12, 28)
-    return 0.0
-
-
-def ground_step_score(down_cm: Optional[int]) -> float:
-    if down_cm is None:
-        return 0.0
-    if down_cm < DOWN_OBSTACLE_CM:
-        return clamp(45 + (DOWN_OBSTACLE_CM - down_cm) * 1.00, 45, 62)
-    if DOWN_STEP_EDGE_MIN_CM <= down_cm <= DOWN_STEP_EDGE_MAX_CM:
-        return clamp(56 - abs(down_cm - 50) * 0.30, 45, 56)
+        return clamp(88 + (down_cm - drop_threshold) * 0.18, 88, 99)
+    if down_cm > GROUND_BASE_CM + GROUND_DROP_THRESHOLD_CM * 0.55:
+        return clamp(45 + (down_cm - GROUND_BASE_CM) * 0.45, 45, 70)
     return 0.0
 
 
 def history_score(history: dict[str, Any]) -> float:
     return clamp(
-        history.get("high_count", 0) * 2
-        + history.get("medium_count", 0) * 1.5
-        + history.get("risk_count", 0) * 0.2,
+        history.get("high_count", 0) * 16
+        + history.get("medium_count", 0) * 8
+        + history.get("risk_count", 0) * 2,
         0,
-        10,
+        35,
     )
 
 
 def choose_direction(frame: SensorFrameCreate, risk_type: str, level: str) -> str:
     if risk_type == "voice_request":
         return "none"
-    if risk_type in {"ground_drop", "ground_step", "fall_detected", "sos"}:
+    if risk_type in {"ground_drop", "fall_detected", "sos"}:
         return "stop"
     if risk_type == "prolonged_obstacle":
         return "stop"
     if risk_type == "approaching_obstacle":
-        return "slow"
+        return "slow" if level == "medium" else "stop"
     if risk_type == "down_obstacle":
         return "slow"
     if risk_type == "left_obstacle":
@@ -1714,47 +1690,45 @@ def feedback_for_risk(risk_type: str, level: str, direction: str) -> dict[str, A
         }
     if risk_type == "prolonged_obstacle":
         return {
-            "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
-            "vibration": {"left": 0, "right": 0, "center": 45, "duration_ms": 300},
+            "buzzer": {"enabled": True, "beeps": 2, "pattern": "companion_attention"},
+            "vibration": {"left": 0, "right": 0, "center": 60, "duration_ms": 300},
             "action": "notify_companion",
         }
     if risk_type == "approaching_obstacle":
         return {
-            "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
-            "vibration": {"left": 0, "right": 0, "center": 45, "duration_ms": 350},
-            "action": "slow",
+            "buzzer": {"enabled": level == "high", "beeps": 2, "pattern": "approaching_obstacle"},
+            "vibration": {"left": 0, "right": 0, "center": 80 if level == "high" else 45, "duration_ms": 350},
+            "action": "slow_or_stop",
         }
-    if risk_type in {"ground_drop", "ground_step"}:
+    if risk_type == "ground_drop":
         return {
-            "buzzer": {"enabled": True, "beeps": 2, "pattern": risk_type},
-            "vibration": {"left": 70, "right": 70, "center": 85, "duration_ms": 650},
+            "buzzer": {"enabled": True, "beeps": 3, "pattern": "ground_drop"},
+            "vibration": {"left": 90, "right": 90, "center": 100, "duration_ms": 900},
             "action": "stop",
         }
     if risk_type == "down_obstacle":
         return {
-            "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
-            "vibration": {"left": 30, "right": 30, "center": 45, "duration_ms": 300},
+            "buzzer": {"enabled": level == "high", "beeps": 1, "pattern": "down_obstacle"},
+            "vibration": {"left": 45, "right": 45, "center": 75, "duration_ms": 400},
             "action": "slow",
         }
     if risk_type in {"front_obstacle", "left_obstacle", "right_obstacle"}:
-        center_level = 45 if level == "low" else (70 if level == "medium" else 100)
-        side_level = 45 if level == "low" else 80
-        motors = {"left": 0, "right": 0, "center": center_level}
+        motors = {"left": 0, "right": 0, "center": 70 if level == "medium" else 100}
         if direction in {"turn_left", "keep_left"}:
-            motors["left"] = side_level
+            motors["left"] = 80
         elif direction in {"turn_right", "keep_right"}:
-            motors["right"] = side_level
+            motors["right"] = 80
         elif direction == "stop":
-            motors = {"left": side_level, "right": side_level, "center": center_level}
+            motors = {"left": 100, "right": 100, "center": 100}
         return {
-            "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
-            "vibration": {**motors, "duration_ms": 280 if level == "low" else 350},
+            "buzzer": {"enabled": level == "high", "beeps": 2, "pattern": "obstacle"},
+            "vibration": {**motors, "duration_ms": 350 if level == "medium" else 650},
             "action": direction,
         }
     if risk_type == "history_risk":
         return {
-            "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
-            "vibration": {"left": 0, "right": 0, "center": 35, "duration_ms": 250},
+            "buzzer": {"enabled": level == "high", "beeps": 1, "pattern": "history"},
+            "vibration": {"left": 0, "right": 0, "center": 55, "duration_ms": 300},
             "action": "slow",
         }
     if risk_type == "user_mark":
@@ -1779,7 +1753,7 @@ def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, 
         return "同一障碍持续出现，已通知陪护端，请停止并重新探测前方。"
     if risk_type == "approaching_obstacle":
         return "障碍距离正在缩短，请立即减速，必要时停止前进。"
-    if risk_type in {"ground_drop", "ground_step"}:
+    if risk_type == "ground_drop":
         return f"下方距离约 {frame.down_cm or '-'} 厘米，可能有台阶或坑洼，请停止。"
     if risk_type == "front_obstacle":
         if direction == "turn_left":
@@ -1798,56 +1772,6 @@ def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, 
     return "当前传感器未发现明显障碍，请继续谨慎前进。"
 
 
-def risk_reason_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, score: float) -> str:
-    if risk_type == "ground_step":
-        return f"down distance {frame.down_cm or '-'}cm matched step threshold: <{DOWN_OBSTACLE_CM}cm or {DOWN_STEP_EDGE_MIN_CM}-{DOWN_STEP_EDGE_MAX_CM}cm lower-edge zone"
-    if risk_type == "none" or score <= 0:
-        return "四路测距和 IMU 未发现需要提醒的风险"
-    if risk_type == "voice_request":
-        return "盲杖按钮短按，请求手机端语音输入"
-    if risk_type == "sos":
-        return "盲杖 SOS 长按触发"
-    if risk_type == "fall_detected":
-        return f"BMI270 检测到疑似跌倒，阶段={frame.fall_stage or '-'}，置信度={frame.fall_confidence if frame.fall_confidence is not None else '-'}"
-    if risk_type == "prolonged_obstacle":
-        return "同一方向障碍持续存在，超过陪护端通知阈值"
-    if risk_type == "approaching_obstacle":
-        return "前方距离在一段时间内持续缩短，存在逼近风险"
-    if risk_type == "ground_drop":
-        return f"下视距离 {frame.down_cm or '-'}cm 超过地面基准 {GROUND_BASE_CM}cm + 落差阈值 {GROUND_DROP_THRESHOLD_CM}cm"
-    if risk_type == "down_obstacle":
-        return f"下视距离 {frame.down_cm or '-'}cm 小于近地障碍阈值 {DOWN_OBSTACLE_CM}cm"
-    if risk_type == "front_obstacle":
-        return f"前方距离 {frame.front_cm or '-'}cm 小于斜持盲杖前向阈值 {FRONT_WARN_CM}/{FRONT_DANGER_CM}cm"
-    if risk_type == "left_obstacle":
-        return f"左侧距离 {frame.left_cm or '-'}cm 小于侧向扫杖阈值 {SIDE_NEAR_CM}/{SIDE_DANGER_CM}cm"
-    if risk_type == "right_obstacle":
-        return f"右侧距离 {frame.right_cm or '-'}cm 小于侧向扫杖阈值 {SIDE_NEAR_CM}/{SIDE_DANGER_CM}cm"
-    if risk_type == "history_risk":
-        return "当前位置附近存在多人历史高风险记录"
-    if risk_type == "user_mark":
-        return "用户通过触控/按钮主动标记风险点"
-    return f"{risk_type} risk score={score:.1f} level={level}"
-
-
-def map_weight_for_risk(risk_type: str, level: str, score: float) -> float:
-    if risk_type in {"fall_detected", "sos"}:
-        return 100.0
-    if risk_type in {"ground_drop", "ground_step"}:
-        return clamp(score, 55, 75)
-    if risk_type == "user_mark":
-        return 60.0
-    if risk_type == "prolonged_obstacle":
-        return 24.0
-    if risk_type == "approaching_obstacle":
-        return 22.0
-    if risk_type == "down_obstacle":
-        return 12.0
-    if risk_type in {"front_obstacle", "left_obstacle", "right_obstacle"}:
-        return 8.0
-    return 0.0
-
-
 def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> dict[str, Any]:
     if frame.button_event == "short_press" or frame.alert_type == "voice_request" or frame.manual_risk_type == "voice_request":
         risk_type = "voice_request"
@@ -1857,10 +1781,10 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
         score = 100.0
     elif frame.manual_risk_type in {"fall_detected", "prolonged_obstacle", "approaching_obstacle"}:
         risk_type = frame.manual_risk_type
-        score = 100.0 if risk_type == "fall_detected" else (34.0 if risk_type == "prolonged_obstacle" else 30.0)
+        score = 100.0 if risk_type == "fall_detected" else (88.0 if risk_type == "prolonged_obstacle" else 76.0)
     elif frame.alert_type in {"fall_detected", "prolonged_obstacle", "approaching_obstacle"}:
         risk_type = frame.alert_type
-        score = 100.0 if risk_type == "fall_detected" else (34.0 if risk_type == "prolonged_obstacle" else 30.0)
+        score = 100.0 if risk_type == "fall_detected" else (88.0 if risk_type == "prolonged_obstacle" else 76.0)
     elif imu_fall_score(frame) > 0:
         risk_type = "fall_detected"
         score = imu_fall_score(frame)
@@ -1873,39 +1797,29 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
             "left_obstacle": side_score(frame.left_cm),
             "right_obstacle": side_score(frame.right_cm),
             "ground_drop": ground_score(frame.down_cm),
-            "ground_step": ground_step_score(frame.down_cm),
         }
         risk_type, score = max(scores.items(), key=lambda item: item[1])
         hist_score = history_score(history)
         if score <= 0 and history.get("high_count", 0) >= 2:
             risk_type = "history_risk"
-            score = 18 + min(history.get("high_count", 0) * 1.5, 10)
+            score = 48 + min(history.get("high_count", 0) * 5, 20)
         elif score > 0:
-            score = max(score, min(100.0, score + hist_score * 0.12))
+            score = max(score, min(100.0, score + hist_score * 0.35))
 
-    public_risk_type = risk_type if score > 0 else "none"
-    level = risk_level_for_analysis(public_risk_type, score)
-    direction = choose_direction(frame, public_risk_type, level)
-    feedback = feedback_for_risk(public_risk_type, level, direction)
-    reason = risk_reason_for_risk(frame, public_risk_type, level, score)
-    map_weight = round(map_weight_for_risk(public_risk_type, level, score), 1)
+    level = risk_level_from_score(score)
+    effective_risk_type = risk_type if score > 0 else "none"
+    direction = choose_direction(frame, effective_risk_type, level)
+    feedback = feedback_for_risk(effective_risk_type, level, direction)
     return {
-        "risk_type": public_risk_type,
+        "risk_type": effective_risk_type,
         "risk_level": level,
         "risk_score": round(score, 1),
-        "map_weight": map_weight,
-        "mapWeight": map_weight,
-        "risk_reason": reason,
-        "riskReason": reason,
-        "risk_source_detail": reason,
-        "riskSourceDetail": reason,
         "direction": direction,
         "sensor": {
             "front_obstacle": "tof_front",
             "left_obstacle": "tof_left",
             "right_obstacle": "tof_right",
             "ground_drop": "tof_down",
-            "ground_step": "tof_down",
             "user_mark": "touch",
             "sos": "sos_button",
             "fall_detected": "bmi270_imu",
@@ -1913,9 +1827,9 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
             "prolonged_obstacle": "tof_trend",
             "approaching_obstacle": "tof_trend",
             "history_risk": "backend_history",
-        }.get(public_risk_type, "none"),
-        "distance_mm": primary_distance_mm(public_risk_type, frame),
-        "voice_prompt": voice_prompt_for_risk(frame, public_risk_type, level, direction),
+        }.get(effective_risk_type, "none"),
+        "distance_mm": primary_distance_mm(effective_risk_type, frame),
+        "voice_prompt": voice_prompt_for_risk(frame, effective_risk_type, level, direction),
         "feedback": feedback,
         "nearby_history": {
             "risk_count": history.get("risk_count", 0),
@@ -1927,17 +1841,25 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
 
 
 def should_store_sensor_analysis(analysis: dict[str, Any]) -> bool:
-    if analysis["risk_type"] in {"voice_request", "user_mark", "sos", "fall_detected"}:
+    if analysis["risk_type"] == "voice_request":
         return True
-    if analysis["risk_type"] in {"ground_drop", "ground_step"}:
-        return float(analysis.get("map_weight") or 0) >= 55
+    # Mild downward distance changes are noisy when the sensor angle/height has
+    # not been calibrated, so only persist ground-drop map points once the
+    # backend classifies them as high risk.
+    if analysis["risk_type"] == "ground_drop" and analysis["risk_level"] != "high":
+        return False
     return analysis["risk_type"] in {
         "front_obstacle",
         "left_obstacle",
         "right_obstacle",
+        "ground_drop",
+        "user_mark",
+        "sos",
+        "fall_detected",
+        "voice_request",
         "prolonged_obstacle",
         "approaching_obstacle",
-    } and float(analysis.get("map_weight") or 0) >= 60 and analysis["risk_level"] in {"medium", "high"}
+    } and analysis["risk_level"] in {"medium", "high"}
 
 
 def amap_key() -> str:
@@ -1952,23 +1874,12 @@ def amap_location(lng: float, lat: float) -> str:
     return f"{lng:.6f},{lat:.6f}"
 
 
-def parse_amap_location(value: Any) -> Optional[tuple[float, float]]:
-    text = str(value or "")
-    if "," not in text:
-        return None
-    try:
-        lng_text, lat_text = text.split(",", 1)
-        return float(lat_text), float(lng_text)
-    except ValueError:
-        return None
-
-
 async def amap_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
     key = amap_key()
     if not key:
         raise HTTPException(status_code=503, detail="AMAP_WEB_KEY is not configured")
     payload = {**params, "key": key, "output": "JSON"}
-    async with httpx.AsyncClient(timeout=12.0, trust_env=False) as client:
+    async with httpx.AsyncClient(timeout=12.0) as client:
         response = await client.get(f"{AMAP_BASE_URL}{path}", params=payload)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
@@ -2023,94 +1934,6 @@ async def geocode_address(address: str, city: Optional[str] = None) -> dict[str,
     }
 
 
-async def search_pois_around(
-    keyword: str,
-    origin_lat: float,
-    origin_lng: float,
-    origin_coordsys: str,
-    city: Optional[str] = None,
-    radius_m: float = WALKING_NAVIGATION_MAX_DISTANCE_M,
-) -> list[dict[str, Any]]:
-    origin_amap_lat, origin_amap_lng = await convert_to_amap_coord(origin_lat, origin_lng, origin_coordsys)
-    params: dict[str, Any] = {
-        "location": amap_location(origin_amap_lng, origin_amap_lat),
-        "keywords": keyword,
-        "radius": int(radius_m),
-        "offset": 10,
-        "page": 1,
-        "extensions": "base",
-        "sortrule": "distance",
-    }
-    if city:
-        params["city"] = city
-        params["citylimit"] = "true"
-    data = await amap_get("/place/around", params)
-    candidates: list[dict[str, Any]] = []
-    for poi in data.get("pois") or []:
-        location = parse_amap_location(poi.get("location"))
-        if not location:
-            continue
-        lat, lng = location
-        try:
-            distance_m = float(poi.get("distance") or haversine_m(origin_amap_lat, origin_amap_lng, lat, lng))
-        except (TypeError, ValueError):
-            distance_m = haversine_m(origin_amap_lat, origin_amap_lng, lat, lng)
-        candidates.append(
-            {
-                "id": poi.get("id"),
-                "name": poi.get("name") or keyword,
-                "address": poi.get("address") or "",
-                "province": poi.get("pname"),
-                "city": poi.get("cityname"),
-                "district": poi.get("adname"),
-                "lat": lat,
-                "lng": lng,
-                "coordsys": "amap",
-                "distance_m": round(distance_m, 1),
-                "raw": poi,
-            }
-        )
-    candidates.sort(key=lambda item: item["distance_m"])
-    return candidates
-
-
-async def resolve_destination_address(
-    address: str,
-    city: Optional[str],
-    origin_lat: Optional[float],
-    origin_lng: Optional[float],
-    origin_coordsys: str,
-) -> dict[str, Any]:
-    nearby_candidates: list[dict[str, Any]] = []
-    if origin_lat is not None and origin_lng is not None:
-        try:
-            nearby_candidates = await search_pois_around(address, origin_lat, origin_lng, origin_coordsys, city)
-        except HTTPException:
-            nearby_candidates = []
-        if nearby_candidates:
-            best = nearby_candidates[0]
-            return {
-                "address": address,
-                "formatted_address": best["name"],
-                "province": best.get("province"),
-                "city": best.get("city"),
-                "district": best.get("district"),
-                "lat": best["lat"],
-                "lng": best["lng"],
-                "coordsys": "amap",
-                "source": "amap_place_around",
-                "distance_m": best["distance_m"],
-                "candidates": nearby_candidates[:5],
-                "raw": best.get("raw"),
-            }
-
-    geocoded = await geocode_address(address, city)
-    geocoded["source"] = "amap_geocode"
-    if nearby_candidates:
-        geocoded["candidates"] = nearby_candidates[:5]
-    return geocoded
-
-
 async def reverse_geocode(lat: float, lng: float, coordsys: str = "gps") -> dict[str, Any]:
     amap_lat, amap_lng = await convert_to_amap_coord(lat, lng, coordsys)
     data = await amap_get(
@@ -2163,90 +1986,25 @@ def min_distance_to_points(lat: float, lng: float, points: list[dict[str, float]
     return min(haversine_m(lat, lng, point["lat"], point["lng"]) for point in points)
 
 
-def local_xy_m(lat: float, lng: float, ref_lat: float, ref_lng: float) -> tuple[float, float]:
-    radius_m = 6371000.0
-    x = math.radians(lng - ref_lng) * radius_m * math.cos(math.radians(ref_lat))
-    y = math.radians(lat - ref_lat) * radius_m
-    return x, y
-
-
-def point_to_segment_distance_m(
-    point_lat: float,
-    point_lng: float,
-    start_lat: float,
-    start_lng: float,
-    end_lat: float,
-    end_lng: float,
-) -> float:
-    px, py = local_xy_m(point_lat, point_lng, start_lat, start_lng)
-    ax, ay = 0.0, 0.0
-    bx, by = local_xy_m(end_lat, end_lng, start_lat, start_lng)
-    dx = bx - ax
-    dy = by - ay
-    length_sq = dx * dx + dy * dy
-    if length_sq <= 0:
-        return math.hypot(px - ax, py - ay)
-    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
-    closest_x = ax + t * dx
-    closest_y = ay + t * dy
-    return math.hypot(px - closest_x, py - closest_y)
-
-
-def min_distance_to_polyline_m(lat: float, lng: float, points: list[dict[str, float]]) -> float:
+def route_risk_summary(points: list[dict[str, float]], buffer_m: float) -> dict[str, Any]:
     if not points:
-        return float("inf")
-    if len(points) == 1:
-        return haversine_m(lat, lng, points[0]["lat"], points[0]["lng"])
-    return min(
-        point_to_segment_distance_m(
-            lat,
-            lng,
-            points[index]["lat"],
-            points[index]["lng"],
-            points[index + 1]["lat"],
-            points[index + 1]["lng"],
-        )
-        for index in range(len(points) - 1)
-    )
-
-
-async def route_risk_summary(points: list[dict[str, float]], buffer_m: float) -> dict[str, Any]:
-    if not points:
-        return {
-            "risk_score": 0.0,
-            "risk_points": [],
-            "risk_count": 0,
-            "medium_high_count": 0,
-            "high_count": 0,
-            "medium_count": 0,
-            "max_level": "low",
-        }
+        return {"risk_score": 0.0, "risk_points": [], "high_count": 0, "medium_count": 0, "max_level": "low"}
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM risk_events WHERE lat IS NOT NULL AND lng IS NOT NULL").fetchall()
 
     risk_points: list[dict[str, Any]] = []
     score = 0.0
-    for item in active_risk_points(limit=1000):
-        level = str(item.get("risk_level") or item.get("riskLevel") or "low").lower()
-        try:
-            risk_lat, risk_lng = await convert_to_amap_coord(float(item["lat"]), float(item["lng"]), "gps")
-        except Exception:
-            risk_lat, risk_lng = float(item["lat"]), float(item["lng"])
-        distance = min_distance_to_polyline_m(risk_lat, risk_lng, points)
+    for row in rows:
+        item = event_to_dict(row)
+        distance = min_distance_to_points(float(item["lat"]), float(item["lng"]), points)
         if distance > buffer_m:
             continue
+        level = item.get("risk_level", "low")
         base = {"high": 32, "medium": 16, "low": 5}.get(level, 5)
         proximity = (1 - distance / buffer_m) ** 2
         contribution = base * proximity
         score += contribution
-        risk_points.append(
-            {
-                **item,
-                "risk_level": level,
-                "riskLevel": level,
-                "distance_to_route_m": round(distance, 1),
-                "distanceToRouteM": round(distance, 1),
-                "score_contribution": round(contribution, 1),
-            }
-        )
+        risk_points.append({**item, "distance_to_route_m": round(distance, 1), "score_contribution": round(contribution, 1)})
 
     risk_points.sort(key=lambda item: item["score_contribution"], reverse=True)
     max_level = "low"
@@ -2257,7 +2015,6 @@ async def route_risk_summary(points: list[dict[str, float]], buffer_m: float) ->
         "risk_score": round(clamp(score, 0, 100), 1),
         "risk_points": risk_points[:20],
         "risk_count": len(risk_points),
-        "medium_high_count": sum(1 for item in risk_points if item["risk_level"] in {"medium", "high"}),
         "high_count": sum(1 for item in risk_points if item["risk_level"] == "high"),
         "medium_count": sum(1 for item in risk_points if item["risk_level"] == "medium"),
         "max_level": max_level,
@@ -2269,11 +2026,10 @@ async def plan_walking_route(
     origin_lng: float,
     destination_lat: float,
     destination_lng: float,
-    origin_coordsys: str,
-    destination_coordsys: str,
+    coordsys: str,
 ) -> dict[str, Any]:
-    origin_amap_lat, origin_amap_lng = await convert_to_amap_coord(origin_lat, origin_lng, origin_coordsys)
-    dest_amap_lat, dest_amap_lng = await convert_to_amap_coord(destination_lat, destination_lng, destination_coordsys)
+    origin_amap_lat, origin_amap_lng = await convert_to_amap_coord(origin_lat, origin_lng, coordsys)
+    dest_amap_lat, dest_amap_lng = await convert_to_amap_coord(destination_lat, destination_lng, coordsys)
     data = await amap_get(
         "/direction/walking",
         {
@@ -2283,8 +2039,8 @@ async def plan_walking_route(
     )
     return {
         "input": {
-            "origin": {"lat": origin_lat, "lng": origin_lng, "coordsys": origin_coordsys},
-            "destination": {"lat": destination_lat, "lng": destination_lng, "coordsys": destination_coordsys},
+            "origin": {"lat": origin_lat, "lng": origin_lng, "coordsys": coordsys},
+            "destination": {"lat": destination_lat, "lng": destination_lng, "coordsys": coordsys},
         },
         "amap_origin": {"lat": origin_amap_lat, "lng": origin_amap_lng},
         "amap_destination": {"lat": dest_amap_lat, "lng": dest_amap_lng},
@@ -2292,12 +2048,12 @@ async def plan_walking_route(
     }
 
 
-async def enrich_walking_route(route: dict[str, Any], buffer_m: float) -> dict[str, Any]:
+def enrich_walking_route(route: dict[str, Any], buffer_m: float) -> dict[str, Any]:
     raw_paths = (route.get("raw", {}).get("route") or {}).get("paths") or []
     paths: list[dict[str, Any]] = []
     for index, path in enumerate(raw_paths):
         points = route_points_from_path(path)
-        risk = await route_risk_summary(points, buffer_m)
+        risk = route_risk_summary(points, buffer_m)
         distance_m = int(float(path.get("distance") or 0))
         duration_s = int(float(path.get("duration") or 0))
         paths.append(
@@ -2325,15 +2081,11 @@ async def enrich_walking_route(route: dict[str, Any], buffer_m: float) -> dict[s
 def route_voice_prompt(best: Optional[dict[str, Any]]) -> str:
     if not best:
         return "未能生成步行路线，请检查起点和终点。"
-    risk = best.get("risk", {})
-    high_count = int(risk.get("high_count") or 0)
-    medium_count = int(risk.get("medium_count") or 0)
-    medium_high_count = high_count + medium_count
-    distance_m = int(best.get("distance_m") or 0)
-    distance_text = f"{distance_m}米" if distance_m < 1000 else f"{distance_m / 1000:.1f}公里"
-    if medium_high_count > 0:
-        return f"已确定步行路线，全程约{distance_text}，路线周围8米内有{medium_high_count}个中高风险点，其中高风险{high_count}个，中风险{medium_count}个。"
-    return f"已确定步行路线，全程约{distance_text}，路线周围8米内暂无中高风险点，请继续谨慎前进。"
+    if best["risk"]["high_count"] > 0:
+        return "推荐当前风险最低路线，但沿途有高风险点，请减速并听从盲杖提示。"
+    if best["risk"]["medium_count"] > 0:
+        return "推荐当前路线，沿途存在中风险记录，请谨慎通过。"
+    return "推荐当前路线，历史风险较低，请继续谨慎前进。"
 
 
 async def generate_route_advice(best_route: Optional[dict[str, Any]], sensor_analysis: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -2441,14 +2193,11 @@ def route_voice_prompt(best: Optional[dict[str, Any]]) -> str:
     if not best:
         return "未能生成步行路线，请检查起点和终点。"
     risk = best.get("risk", {})
-    high_count = int(risk.get("high_count") or 0)
-    medium_count = int(risk.get("medium_count") or 0)
-    medium_high_count = high_count + medium_count
-    distance_m = int(best.get("distance_m") or 0)
-    distance_text = f"{distance_m}米" if distance_m < 1000 else f"{distance_m / 1000:.1f}公里"
-    if medium_high_count > 0:
-        return f"已确定步行路线，全程约{distance_text}，路线周围8米内有{medium_high_count}个中高风险点，其中高风险{high_count}个，中风险{medium_count}个。"
-    return f"已确定步行路线，全程约{distance_text}，路线周围8米内暂无中高风险点，请继续谨慎前进。"
+    if risk.get("high_count", 0) > 0:
+        return "已选择综合风险较低路线，但沿途有高风险点，请减速通行。"
+    if risk.get("medium_count", 0) > 0:
+        return "已选择当前推荐路线，沿途有中风险记录，请谨慎通行。"
+    return "已选择历史风险较低路线，请继续谨慎前进。"
 
 
 def parse_route_text(text: str) -> tuple[Optional[str], Optional[str]]:
@@ -2514,91 +2263,7 @@ def parse_route_text(text: str) -> tuple[Optional[str], Optional[str]]:
     match = re.search(r"(?:\u5bfc\u822a\u5230|\u5e26\u6211\u53bb|\u53bb|\u524d\u5f80)(.+)", normalized)
     if match:
         return None, match.group(1).strip(" ，。,")
-    return None, None
-
-
-def is_plain_greeting(text: str) -> bool:
-    normalized = re.sub(r"[\s，。！？!?,.]", "", text.strip().lower())
-    return normalized in {
-        "你好",
-        "你好啊",
-        "您好",
-        "您好啊",
-        "hello",
-        "hi",
-        "嗨",
-        "哈喽",
-    }
-
-
-def parse_json_object(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start >= 0 and end > start:
-        cleaned = cleaned[start : end + 1]
-    return json.loads(cleaned)
-
-
-async def parse_route_text_with_llm(text: str) -> dict[str, Any]:
-    fallback_origin, fallback_destination = parse_route_text(text)
-    if is_plain_greeting(text):
-        return {
-            "origin_text": None,
-            "destination_text": None,
-            "intent": "unknown",
-            "confidence": 1.0,
-            "reply": "你好，我在。请按住说出要导航去的地方。",
-            "fallback": True,
-        }
-    fallback = {
-        "origin_text": fallback_origin,
-        "destination_text": fallback_destination,
-        "intent": "route" if fallback_destination else "unknown",
-        "confidence": 0.45 if fallback_destination else 0.2,
-        "reply": None if fallback_destination else "请说出要导航去的地方，例如：导航到南开大学图书馆。",
-        "fallback": True,
-    }
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "你是智能盲杖的语音指令解析器。"
-                "只返回 JSON，不要 Markdown。字段：intent, origin_text, destination_text, confidence, reply。"
-                "intent 可选 route/query_risk/repeat/sos/unknown。"
-                "如果用户想导航，把 destination_text 提取成可用于高德地理编码的中文地点名。"
-                "如果用户说从某地到某地，同时填写 origin_text 和 destination_text。"
-                "问候、闲聊、无目的地的话必须返回 unknown，destination_text 为空。"
-            ),
-        },
-        {"role": "user", "content": json.dumps({"text": text}, ensure_ascii=False)},
-    ]
-    try:
-        content, meta = await call_chat_completion(messages, temperature=0.0)
-        if not content:
-            return {**fallback, "provider": meta["provider"], "model": meta["model"]}
-        parsed = parse_json_object(content)
-        intent = parsed.get("intent") or fallback["intent"]
-        origin_text = parsed.get("origin_text") or fallback_origin
-        destination_text = parsed.get("destination_text") if intent == "route" else None
-        destination_text = destination_text or (fallback_destination if intent == "route" else None)
-        if intent == "route" and not destination_text:
-            intent = "unknown"
-        return {
-            "origin_text": origin_text,
-            "destination_text": destination_text,
-            "intent": intent,
-            "confidence": parsed.get("confidence", 0.0),
-            "reply": parsed.get("reply") or (None if destination_text else fallback["reply"]),
-            "fallback": False,
-            "provider": meta["provider"],
-            "model": meta["model"],
-        }
-    except Exception as exc:
-        return {**fallback, "error": str(exc), "provider": chat_config()["provider"], "model": chat_config()["model"]}
+    return None, normalized
 
 
 async def resolve_route_endpoint(request: MapRouteRequest) -> tuple[float, float, float, float, dict[str, Any]]:
@@ -2612,28 +2277,16 @@ async def resolve_route_endpoint(request: MapRouteRequest) -> tuple[float, float
     if (origin_lat is None or origin_lng is None) and request.origin_text:
         origin_meta = await geocode_address(request.origin_text, request.city)
         origin_lat, origin_lng = origin_meta["lat"], origin_meta["lng"]
-    elif origin_lat is not None and origin_lng is not None:
-        origin_meta = {"source": "request_coordinate", "coordsys": request.coordsys}
+    if (dest_lat is None or dest_lng is None) and request.destination_text:
+        dest_meta = await geocode_address(request.destination_text, request.city)
+        dest_lat, dest_lng = dest_meta["lat"], dest_meta["lng"]
     if (origin_lat is None or origin_lng is None) and request.device_id:
         latest = latest_location_for_device(request.device_id)
         if latest:
             origin_lat, origin_lng = float(latest["lat"]), float(latest["lng"])
-            origin_meta = {"source": "latest_device_location", "device_id": request.device_id, "coordsys": request.coordsys}
+            origin_meta = {"source": "latest_device_location", "device_id": request.device_id}
     if origin_lat is None or origin_lng is None:
         raise HTTPException(status_code=400, detail="origin coordinate, origin_text, or device latest location is required")
-
-    origin_coordsys = str(origin_meta.get("coordsys") or request.coordsys)
-    if (dest_lat is None or dest_lng is None) and request.destination_text:
-        dest_meta = await resolve_destination_address(
-            request.destination_text,
-            request.city,
-            origin_lat,
-            origin_lng,
-            origin_coordsys,
-        )
-        dest_lat, dest_lng = dest_meta["lat"], dest_meta["lng"]
-    elif dest_lat is not None and dest_lng is not None:
-        dest_meta = {"source": "request_coordinate", "coordsys": request.coordsys}
     if dest_lat is None or dest_lng is None:
         raise HTTPException(status_code=400, detail="destination coordinate or destination_text is required")
     return origin_lat, origin_lng, dest_lat, dest_lng, {"origin": origin_meta, "destination": dest_meta}
@@ -2641,13 +2294,6 @@ async def resolve_route_endpoint(request: MapRouteRequest) -> tuple[float, float
 
 def chat_config() -> dict[str, str]:
     provider = env("LLM_PROVIDER", "ark").lower()
-    if provider in {"vei", "volces", "volcengine", "ai_gateway"}:
-        return {
-            "provider": "vei",
-            "api_key": env("VEI_API_KEY"),
-            "base_url": env("VEI_BASE_URL", env("VEI_OPENAI_BASE_URL", "https://ai-gateway.vei.volces.com/v1")).rstrip("/"),
-            "model": env("VEI_MODEL", "doubao-1.5-lite-32k"),
-        }
     if provider == "openai":
         return {
             "provider": "openai",
@@ -2665,26 +2311,6 @@ def chat_config() -> dict[str, str]:
 
 def stt_config() -> dict[str, str]:
     provider = env("STT_PROVIDER", "openai").lower()
-    if provider in {"volc_seedasr", "seedasr", "doubao_stt", "volc_asr", "volcengine_asr"}:
-        return {
-            "provider": "volc_seedasr",
-            "api_key": env("VOLC_ASR_API_KEY", env("DOUBAO_STT_API_KEY", env("SEEDASR_API_KEY", env("STT_API_KEY", "")))),
-            "app_key": env("VOLC_ASR_APP_KEY", env("DOUBAO_STT_APP_ID", env("VOLC_ASR_APP_ID", ""))),
-            "access_key": env("VOLC_ASR_ACCESS_KEY", env("DOUBAO_STT_ACCESS_KEY", env("VOLC_ASR_ACCESS_TOKEN", ""))),
-            "resource_id": env("VOLC_ASR_RESOURCE_ID", "volc.seedasr.auc"),
-            "submit_url": env("VOLC_ASR_SUBMIT_URL", "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"),
-            "query_url": env("VOLC_ASR_QUERY_URL", "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"),
-            "model": env("VOLC_ASR_MODEL", "bigmodel"),
-            "poll_interval_sec": env("VOLC_ASR_POLL_INTERVAL_SEC", "1.0"),
-            "max_polls": env("VOLC_ASR_MAX_POLLS", "20"),
-        }
-    if provider in {"vei", "volces", "volcengine", "ai_gateway"}:
-        return {
-            "provider": "vei",
-            "api_key": env("VEI_API_KEY"),
-            "base_url": env("VEI_BASE_URL", env("VEI_OPENAI_BASE_URL", "https://ai-gateway.vei.volces.com/v1")).rstrip("/"),
-            "model": env("VEI_STT_MODEL", env("STT_MODEL", "")),
-        }
     if provider == "ark":
         return {
             "provider": "ark",
@@ -3113,6 +2739,8 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
             )
         )
 
+    frame = normalized_sensor_request(frame)
+
     history = nearby_summary(lat, lng, DEFAULT_NEARBY_RADIUS_M)
     analysis = analyze_sensor_frame(frame, history)
     device_state = upsert_device_state(frame, lat, lng, analysis)
@@ -3152,11 +2780,7 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
                     "accel_y_g": frame.accel_y_g,
                     "accel_z_g": frame.accel_z_g,
                     "accel_total_g": frame.accel_total_g,
-                    "hardware_profile": "esp32c5_tca_ch2_3_4_5_mpr121_ch7_pca9685_ch0_1_2_bmi270",
-                    "risk_reason": analysis.get("risk_reason"),
-                    "riskReason": analysis.get("riskReason"),
-                    "map_weight": analysis.get("map_weight"),
-                    "mapWeight": analysis.get("mapWeight"),
+                    "hardware_profile": "esp32c5_tca_ch2_3_4_5_mpr121_ch7_pca9685_ch8_9_10_bmi270",
                     "nearby_history": analysis["nearby_history"],
                     "extra": frame.extra,
                 },
@@ -3167,7 +2791,6 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
             "[SMARTCANE] event "
             f"id={stored_event['id']} device={stored_event['device_id']} "
             f"type={stored_event['risk_type']} level={stored_event['risk_level']} "
-            f"map_weight={analysis.get('map_weight')} reason={analysis.get('risk_reason')} "
             f"front={stored_event['front_cm']} left={stored_event['left_cm']} "
             f"right={stored_event['right_cm']} down={stored_event['down_cm']}",
             flush=True,
@@ -3305,31 +2928,8 @@ async def map_geocode(
 @app.post("/api/navigation/risk-aware-route")
 async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
     origin_lat, origin_lng, dest_lat, dest_lng, resolved = await resolve_route_endpoint(request)
-    origin_coordsys = str(resolved.get("origin", {}).get("coordsys") or request.coordsys)
-    dest_coordsys = str(resolved.get("destination", {}).get("coordsys") or request.coordsys)
-    origin_amap_lat, origin_amap_lng = await convert_to_amap_coord(origin_lat, origin_lng, origin_coordsys)
-    dest_amap_lat, dest_amap_lng = await convert_to_amap_coord(dest_lat, dest_lng, dest_coordsys)
-    straight_distance_m = haversine_m(origin_amap_lat, origin_amap_lng, dest_amap_lat, dest_amap_lng)
-    if straight_distance_m > WALKING_NAVIGATION_MAX_DISTANCE_M:
-        voice_prompt = "目的地超过3公里，当前仅支持3公里内的步行导航。请换一个更近的目的地。"
-        return {
-            "routes": [],
-            "best_route": None,
-            "route_count": 0,
-            "provider": "amap_web_service",
-            "navigation_mode": "walking",
-            "navigation_status": "out_of_walking_range",
-            "walking_max_distance_m": WALKING_NAVIGATION_MAX_DISTANCE_M,
-            "straight_distance_m": round(straight_distance_m, 1),
-            "resolved": resolved,
-            "origin": {"lat": origin_lat, "lng": origin_lng, "coordsys": origin_coordsys},
-            "destination": {"lat": dest_lat, "lng": dest_lng, "coordsys": dest_coordsys},
-            "amap_origin": {"lat": origin_amap_lat, "lng": origin_amap_lng},
-            "amap_destination": {"lat": dest_amap_lat, "lng": dest_amap_lng},
-            "voice_prompt": voice_prompt,
-        }
-    route = await plan_walking_route(origin_lat, origin_lng, dest_lat, dest_lng, origin_coordsys, dest_coordsys)
-    enriched = await enrich_walking_route(route, request.route_buffer_m)
+    route = await plan_walking_route(origin_lat, origin_lng, dest_lat, dest_lng, request.coordsys)
+    enriched = enrich_walking_route(route, request.route_buffer_m)
     sensor_analysis = None
     if request.sensor_frame:
         history = nearby_summary(origin_lat, origin_lng, request.risk_radius_m)
@@ -3338,42 +2938,25 @@ async def risk_aware_route(request: MapRouteRequest) -> dict[str, Any]:
     return {
         **enriched,
         "provider": "amap_web_service",
-        "navigation_mode": "walking",
-        "navigation_status": "ready",
-        "walking_max_distance_m": WALKING_NAVIGATION_MAX_DISTANCE_M,
-        "straight_distance_m": round(straight_distance_m, 1),
         "resolved": resolved,
         "origin": route["input"]["origin"],
         "destination": route["input"]["destination"],
         "amap_origin": route["amap_origin"],
         "amap_destination": route["amap_destination"],
         "risk_method": {
-            "name": "active_risk_points_route_buffer_v2",
-            "description": "active risk points within the route polyline buffer are counted; lower combined score is safer",
+            "name": "sensor_history_route_score_v1",
+            "description": "route score = nearby stored risk proximity + walking cost; lower is safer",
             "route_buffer_m": request.route_buffer_m,
-            "counted_levels": ["medium", "high"],
         },
         "sensor_analysis": sensor_analysis,
         "llm_advice": llm_advice,
-        "voice_prompt": enriched.get("voice_prompt") or llm_advice.get("advice"),
+        "voice_prompt": llm_advice.get("advice") or enriched.get("voice_prompt"),
     }
 
 
 @app.post("/api/navigation/voice-route")
 async def voice_route(request: VoiceRouteRequest) -> dict[str, Any]:
-    parsed_command = await parse_route_text_with_llm(request.text)
-    origin_text = parsed_command.get("origin_text")
-    destination_text = parsed_command.get("destination_text")
-    if parsed_command.get("intent") in {"repeat", "query_risk", "sos", "unknown"} and not destination_text:
-        return {
-            "text": request.text,
-            "parsed": parsed_command,
-            "voice_prompt": parsed_command.get("reply") or "\u5df2\u6536\u5230\u8bed\u97f3\u6307\u4ee4",
-            "route_count": 0,
-            "best_route": None,
-            "provider": parsed_command.get("provider"),
-            "model": parsed_command.get("model"),
-        }
+    origin_text, destination_text = parse_route_text(request.text)
     route_request = MapRouteRequest(
         device_id=request.device_id,
         origin_lat=request.current_lat,
@@ -3386,7 +2969,7 @@ async def voice_route(request: VoiceRouteRequest) -> dict[str, Any]:
     route = await risk_aware_route(route_request)
     return {
         "text": request.text,
-        "parsed": parsed_command,
+        "parsed": {"origin_text": origin_text, "destination_text": destination_text},
         **route,
     }
 
@@ -3890,6 +3473,7 @@ def nearby_risk_warning(
 
 @app.post("/api/ai/deep-risk")
 def deep_risk(req: DeepRiskRequest) -> dict[str, Any]:
+    req = normalized_sensor_request(req)
     history = nearby_summary(req.lat, req.lng, req.nearby_radius_m)
     deep = score_deep_risk(req, history)
     return {
@@ -3903,6 +3487,7 @@ def deep_risk(req: DeepRiskRequest) -> dict[str, Any]:
 
 @app.post("/api/ai/advice")
 async def ai_advice(req: AdviceRequest) -> dict[str, Any]:
+    req = normalized_sensor_request(req)
     history = nearby_summary(req.lat, req.lng, req.nearby_radius_m)
     deep = score_deep_risk(req, history)
     result = await generate_advice(req, history, deep)
@@ -3981,132 +3566,14 @@ async def text_command(req: TextCommandRequest) -> dict[str, Any]:
     return {"text": req.text, **result}
 
 
-def pcm16_mono_16k_to_wav_bytes(content: bytes) -> bytes:
-    output = io.BytesIO()
-    with wave.open(output, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(16000)
-        wav.writeframes(content)
-    return output.getvalue()
-
-
-def normalize_audio_for_seedasr(content: bytes, filename: Optional[str], content_type: Optional[str]) -> tuple[bytes, str]:
-    name = (filename or "").lower()
-    mime = (content_type or "").lower()
-    if name.endswith(".wav") or "wav" in mime:
-        return content, "wav"
-    if name.endswith(".mp3") or "mpeg" in mime or "mp3" in mime:
-        return content, "mp3"
-    if name.endswith(".ogg") or "ogg" in mime:
-        return content, "ogg"
-    if name.endswith(".m4a") or "m4a" in mime or "mp4" in mime:
-        return content, "m4a"
-    return pcm16_mono_16k_to_wav_bytes(content), "wav"
-
-
-def seedasr_headers(cfg: dict[str, str], request_id: str) -> dict[str, str]:
-    headers = {
-        "Content-Type": "application/json",
-        "X-Api-Resource-Id": cfg["resource_id"],
-        "X-Api-Request-Id": request_id,
-        "X-Api-Sequence": "-1",
-    }
-    if cfg.get("api_key"):
-        headers["x-api-key"] = cfg["api_key"]
-        return headers
-    if cfg.get("app_key") and cfg.get("access_key"):
-        headers["X-Api-App-Key"] = cfg["app_key"]
-        headers["X-Api-Access-Key"] = cfg["access_key"]
-        return headers
-    raise HTTPException(status_code=503, detail="Doubao speech recognition is not configured")
-
-
-def extract_seedasr_text(payload: dict[str, Any]) -> str:
-    result = payload.get("result")
-    if isinstance(result, dict):
-        text = str(result.get("text") or "").strip()
-        if text:
-            return text
-        utterances = result.get("utterances")
-        if isinstance(utterances, list):
-            parts = [str(item.get("text") or "").strip() for item in utterances if isinstance(item, dict)]
-            return "".join(part for part in parts if part)
-    return str(payload.get("text") or "").strip()
-
-
-async def transcribe_with_seedasr(
-    cfg: dict[str, str],
-    content: bytes,
-    filename: Optional[str],
-    content_type: Optional[str],
-    uid: str,
-) -> dict[str, Any]:
-    audio_bytes, audio_format = normalize_audio_for_seedasr(content, filename, content_type)
-    request_id = str(uuid.uuid4())
-    headers = seedasr_headers(cfg, request_id)
-    audio_payload = {
-        "data": base64.b64encode(audio_bytes).decode("ascii"),
-        "format": audio_format,
-    }
-    body = {
-        "user": {"uid": uid or "smartcane"},
-        "audio": audio_payload,
-        "request": {
-            "model_name": cfg["model"] or "bigmodel",
-            "enable_itn": True,
-            "enable_punc": True,
-            "enable_ddc": False,
-            "enable_speaker_info": False,
-            "enable_channel_split": False,
-            "show_utterances": False,
-            "vad_segment": False,
-            "sensitive_words_filter": "",
-        },
-    }
-    timeout = httpx.Timeout(90.0, connect=15.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        submit_response = await client.post(cfg["submit_url"], headers=headers, json=body)
-        if submit_response.status_code >= 400:
-            raise HTTPException(status_code=submit_response.status_code, detail=submit_response.text)
-        status_code = submit_response.headers.get("X-Api-Status-Code")
-        if status_code and status_code != "20000000":
-            raise HTTPException(status_code=502, detail=submit_response.headers.get("X-Api-Message", "SeedASR submit failed"))
-
-        interval = max(0.5, float(cfg.get("poll_interval_sec") or "1.0"))
-        max_polls = max(1, int(cfg.get("max_polls") or "20"))
-        for _ in range(max_polls):
-            await asyncio.sleep(interval)
-            query_response = await client.post(cfg["query_url"], headers=headers, content="{}")
-            if query_response.status_code >= 400:
-                raise HTTPException(status_code=query_response.status_code, detail=query_response.text)
-            query_text = query_response.text.strip()
-            if not query_text or query_text == "{}":
-                continue
-            payload = query_response.json()
-            transcript = extract_seedasr_text(payload)
-            if transcript:
-                return {
-                    "provider": cfg["provider"],
-                    "model": cfg["model"],
-                    "text": transcript,
-                    "request_id": request_id,
-                    "raw": payload,
-                }
-    raise HTTPException(status_code=504, detail="Doubao speech recognition timed out")
-
-
-async def transcribe_upload(
-    file: UploadFile,
-    language: Optional[str],
-    prompt: Optional[str],
-    uid: str = "smartcane",
+@app.post("/api/voice/transcribe")
+async def transcribe_voice(
+    file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+    prompt: Optional[str] = Form(None),
 ) -> dict[str, Any]:
     cfg = stt_config()
     content = await file.read()
-
-    if cfg["provider"] == "volc_seedasr":
-        return await transcribe_with_seedasr(cfg, content, file.filename, file.content_type, uid)
 
     if not cfg["api_key"] or not cfg["model"]:
         return await asyncio.to_thread(transcribe_with_local_whisper, content, file.filename, language)
@@ -4142,102 +3609,28 @@ async def transcribe_upload(
     }
 
 
-def voice_route_failure_prompt(detail: Any) -> str:
-    if isinstance(detail, dict):
-        infocode = str(detail.get("infocode") or "")
-        info = str(detail.get("info") or "")
-        if infocode == "20803" or info == "OVER_DIRECTION_RANGE":
-            return "语音已识别，但步行路线距离过长。请确认当前定位，或说一个更近的目的地。"
-        if infocode == "20800":
-            return "语音已识别，但起点或终点不在高德步行规划范围内。请换一个附近地点。"
-        if infocode == "20801":
-            return "语音已识别，但起点或终点附近没有可规划道路。请换一个更明确的位置。"
-        if infocode == "10001":
-            return "语音已识别，但高德服务 Key 不正确或已过期。"
-        if infocode == "10002":
-            return "语音已识别，但高德 Web 服务没有开通对应接口权限。"
-        return f"语音已识别，但高德路线规划失败：{info or infocode or '未知错误'}。"
-    text = str(detail or "").strip()
-    if "destination coordinate" in text or "destination_text" in text:
-        return "语音已识别，但没有听清目的地。请再说一次要去哪里。"
-    if "origin coordinate" in text:
-        return "语音已识别，但当前定位不可用。请开启定位后再试。"
-    return "语音已识别，但路线规划暂时失败。请稍后再试。"
-
-
-@app.post("/api/voice/transcribe")
-async def transcribe_voice(
-    file: UploadFile = File(...),
-    language: Optional[str] = Form(None),
-    prompt: Optional[str] = Form(None),
-) -> dict[str, Any]:
-    return await transcribe_upload(file=file, language=language, prompt=prompt)
-
-
 @app.post("/api/voice/command")
 async def voice_command(
     device_id: str = Form(...),
     file: UploadFile = File(...),
     language: Optional[str] = Form(None),
-    current_lat: Optional[float] = Form(None),
-    current_lng: Optional[float] = Form(None),
-    city: Optional[str] = Form(None),
-    coordsys: str = Form("gps"),
 ) -> dict[str, Any]:
-    transcript = await transcribe_upload(file=file, language=language, prompt=None, uid=device_id)
-    transcript_text = str(transcript.get("text") or "").strip()
-    if not transcript_text:
+    transcript = await transcribe_voice(file=file, language=language, prompt=None)
+    text = str(transcript.get("text") or "").strip()
+    if not text:
         return {
             "device_id": device_id,
             "transcript": "",
-            "stt": {
-                "provider": transcript.get("provider"),
-                "model": transcript.get("model"),
-            },
             "intent": "none",
             "action": "none",
             "confidence": 0.0,
-            "reply": "没有听清，请再按住说一次",
-            "voice_prompt": "没有听清，请再按住说一次",
-            "route_count": 0,
-            "fallback": True,
-        }
-    try:
-        route_result = await voice_route(
-            VoiceRouteRequest(
-                device_id=device_id,
-                text=transcript_text,
-                current_lat=current_lat,
-                current_lng=current_lng,
-                city=city,
-                coordsys=coordsys,
-            )
-        )
-    except HTTPException as exc:
-        prompt_text = voice_route_failure_prompt(exc.detail)
-        return {
-            "device_id": device_id,
-            "transcript": transcript_text,
-            "stt": {
-                "provider": transcript.get("provider"),
-                "model": transcript.get("model"),
-            },
-            "reply": prompt_text,
-            "voice_prompt": prompt_text,
-            "route_count": 0,
-            "best_route": None,
-            "route_error": exc.detail,
-        }
-    return {
-        "device_id": device_id,
-        "transcript": transcript_text,
-        "stt": {
+            "reply": "???????????????",
             "provider": transcript.get("provider"),
             "model": transcript.get("model"),
-        },
-        **route_result,
-    }
-
+            "fallback": True,
+        }
+    parsed = await parse_command_with_llm(text, device_id)
+    return {"device_id": device_id, "transcript": text, **parsed}
 
 
 if __name__ == "__main__":
