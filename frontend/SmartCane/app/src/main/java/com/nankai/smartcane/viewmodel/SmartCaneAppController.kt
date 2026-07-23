@@ -90,6 +90,7 @@ class SmartCaneAppController private constructor(
     private var latestContinuousLocation: Location? = null
     private var activeTtsUtteranceId: String? = null
     private var lastAlertId: Int = 0
+    private var alertBaselineReady = false
     private var lastHardwareRiskSignature: String? = null
     private var lastHardwareRiskSpokenAt: Long = 0L
     private val announcedNearbyRiskIds = mutableSetOf<Int>()
@@ -474,6 +475,11 @@ class SmartCaneAppController private constructor(
                         val newest = result.data.maxByOrNull { it.id }
                         if (newest != null && newest.id > lastAlertId) {
                             lastAlertId = newest.id
+                            if (!alertBaselineReady) {
+                                alertBaselineReady = true
+                                delay(5_000L)
+                                continue
+                            }
                             if (newest.riskType == "voice_request" && role == "blind") {
                                 _uiState.update {
                                     it.copy(
@@ -493,6 +499,7 @@ class SmartCaneAppController private constructor(
                     }
                     is ApiResult.Failure -> Unit
                 }
+                alertBaselineReady = true
                 delay(5_000L)
             }
         }

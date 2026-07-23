@@ -42,6 +42,9 @@ DEFAULT_NEARBY_RADIUS_M = 80.0
 ROUTE_RISK_BUFFER_M = 8.0
 WALKING_NAVIGATION_MAX_DISTANCE_M = 3000.0
 RISK_POINT_CLUSTER_RADIUS_M = 12.0
+LEGACY_SIM_POINT_LAT = 31.2304
+LEGACY_SIM_POINT_LNG = 121.4737
+LEGACY_SIM_POINT_RADIUS_M = 80.0
 RISK_POINT_TRANSIENT_TTL_SECONDS = 2 * 60 * 60
 RISK_POINT_FIXED_TTL_SECONDS = 7 * 24 * 60 * 60
 RISK_POINT_EMERGENCY_TTL_SECONDS = 30 * 60
@@ -1147,11 +1150,24 @@ def risk_point_confidence(level: str, report_count: int, source_count: int) -> f
     return round(min(0.97, 0.32 + level_bonus + report_bonus + source_bonus), 2)
 
 
+def is_legacy_sim_point(lat: float, lng: float) -> bool:
+    return haversine_m(lat, lng, LEGACY_SIM_POINT_LAT, LEGACY_SIM_POINT_LNG) <= LEGACY_SIM_POINT_RADIUS_M
+
+
 def expire_risk_points() -> None:
     with db() as conn:
         conn.execute(
             "UPDATE risk_points SET status = 'expired' WHERE status = 'active' AND expires_at < ?",
             (now_iso(),),
+        )
+        conn.execute(
+            "UPDATE risk_points SET status = 'expired' WHERE status = 'active' AND lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?",
+            (
+                LEGACY_SIM_POINT_LAT - 0.001,
+                LEGACY_SIM_POINT_LAT + 0.001,
+                LEGACY_SIM_POINT_LNG - 0.001,
+                LEGACY_SIM_POINT_LNG + 0.001,
+            ),
         )
 
 
@@ -1171,6 +1187,8 @@ def upsert_risk_point_for_event(event: dict[str, Any]) -> None:
     lat = float(lat)
     lng = float(lng)
     if abs(lat) < 1e-9 and abs(lng) < 1e-9:
+        return
+    if is_legacy_sim_point(lat, lng):
         return
 
     now = event.get("timestamp") or now_iso()
