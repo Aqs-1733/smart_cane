@@ -117,8 +117,8 @@ data class RiskEvent(
     val time: String
 )
 
-private const val DEMO_CENTER_LAT = 31.2304
-private const val DEMO_CENTER_LNG = 121.4737
+private const val DEFAULT_MAP_CENTER_LAT = 38.986331
+private const val DEFAULT_MAP_CENTER_LNG = 117.342138
 
 private data class MapRiskMarker(
     val position: LatLng,
@@ -129,9 +129,9 @@ private data class MapRiskMarker(
 
 private val demoEvents = listOf(
     RiskEvent(38, "cane_003", "front_obstacle", "low", "front", 1285, "前方约 128 厘米有障碍物，请减速并准备绕行。", "14:30:35"),
-    RiskEvent(37, "cane_002", "left_obstacle", "low", "left", 422, "左侧约 42 厘米有障碍物，请向右侧保持距离。", "14:30:33"),
-    RiskEvent(36, "cane_003", "right_obstacle", "low", "right", 1196, "右侧约 119 厘米有障碍物，请向左侧保持距离。", "14:30:31"),
-    RiskEvent(35, "cane_001", "ground_drop", "medium", "down", 1200, "前方地面高度变化明显，可能有台阶或坑洼，请停止前进并用盲杖确认。", "14:30:29")
+    RiskEvent(37, "cane_002", "left_obstacle", "high", "left", 422, "左侧约 42 厘米有障碍物，请向右侧保持距离。", "14:30:33"),
+    RiskEvent(36, "cane_003", "right_obstacle", "medium", "right", 1196, "右侧约 119 厘米有障碍物，请向左侧保持距离。", "14:30:31"),
+    RiskEvent(35, "cane_001", "ground_drop", "high", "down", 1200, "前方地面高度变化明显，可能有台阶或坑洼，请停止前进并用盲杖确认。", "14:30:29")
 )
 
 private sealed interface LatestEventsUiState {
@@ -746,7 +746,7 @@ private fun MapTopBar(pointCount: Int, highCount: Int, mediumCount: Int, sourceD
         ) {
             Column(Modifier.weight(1f)) {
                 Text("风险地图", color = Color(0xFF0F172A), fontSize = 22.sp, fontWeight = FontWeight.Black, maxLines = 1)
-                Text("高德地图 · $pointCount 个附近风险点", color = Color(0xFF64748B), fontSize = 13.sp, maxLines = 1)
+                Text("高德地图 · $pointCount 个多用户风险点", color = Color(0xFF64748B), fontSize = 13.sp, maxLines = 1)
             }
             Surface(color = if (locationGranted) Color(0xFFDCFCE7) else Color(0xFFFFF7ED), shape = RoundedCornerShape(999.dp)) {
                 Text(
@@ -816,12 +816,12 @@ private fun NearbyRiskBottomSheet(
                 Spacer(Modifier.height(8.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("附近风险点", color = Color(0xFF0F172A), fontSize = 18.sp, fontWeight = FontWeight.Black, maxLines = 1)
+                        Text("多用户风险点", color = Color(0xFF0F172A), fontSize = 18.sp, fontWeight = FontWeight.Black, maxLines = 1)
                         Text(
                             if (expanded) {
                                 "下滑收起"
                             } else if (events.isEmpty()) {
-                                "等待设备上报附近风险点"
+                                "等待真实设备或用户标记风险点"
                             } else {
                                 "上拉查看半屏列表"
                             },
@@ -844,7 +844,7 @@ private fun NearbyRiskBottomSheet(
                     if (events.isEmpty()) {
                         item {
                             Text(
-                                "暂未收到附近风险点上报。",
+                                "暂未收到真实设备或用户标记的风险点。",
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
                                 color = Color(0xFF64748B),
                                 textAlign = TextAlign.Center
@@ -923,8 +923,8 @@ private fun CompatibleRiskMap(points: List<LatestRiskEventDto>, showMyLocation: 
             }
         }
         Column(Modifier.align(Alignment.BottomStart).padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("南开大学图书馆附近", color = Color(0xFF0F172A), fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            Text("风险点来自设备与后端实时上报", color = Color(0xFF64748B), fontSize = 13.sp)
+            Text("多用户风险地图", color = Color(0xFF0F172A), fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text("仅显示真实设备与用户标记风险点", color = Color(0xFF64748B), fontSize = 13.sp)
         }
     }
 }
@@ -951,7 +951,7 @@ private fun AmapRiskMap(points: List<LatestRiskEventDto>, showMyLocation: Boolea
         modifier = modifier,
         update = { view ->
             val markers = points.mapNotNull { it.toMapMarker(context) }
-            val fallbackCenter = convertGpsToAmap(context, LatLng(DEMO_CENTER_LAT, DEMO_CENTER_LNG))
+            val fallbackCenter = convertGpsToAmap(context, LatLng(DEFAULT_MAP_CENTER_LAT, DEFAULT_MAP_CENTER_LNG))
             val center = markers.firstOrNull()?.position ?: fallbackCenter
             val amap = view.map
             amap.uiSettings.isZoomControlsEnabled = false
@@ -1241,5 +1241,3 @@ fun BottomNavigationBar(selectedTab: Int, onTabSelected: (Int) -> Unit) {
         }
     }
 }
-
-

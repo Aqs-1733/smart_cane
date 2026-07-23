@@ -6,15 +6,16 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.OutputStreamWriter
+import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.UUID
 
 object ApiConfig {
     /**
      * Set BACKEND_BASE_URL in local.properties for a physical phone, for example:
-     * BACKEND_BASE_URL=http://118.31.221.165:8016
+     * BACKEND_BASE_URL=http://192.168.1.23:8000
      */
     val BASE_URL: String = BuildConfig.BACKEND_BASE_URL.trimEnd('/')
 }
@@ -79,7 +80,8 @@ data class LatestRiskEventDto(
     val longitude: Double?,
     val timestamp: String,
     val voicePrompt: String = "",
-    val riskScore: Double? = null
+    val riskScore: Double? = null,
+    val distanceMeters: Double? = null
 )
 
 data class EmergencyAlertDto(
@@ -249,7 +251,11 @@ data class RouteAdviceDto(
 
 data class VoiceCommandDto(
     val transcript: String,
-    val reply: String
+    val voicePrompt: String,
+    val routeCount: Int,
+    val provider: String,
+    val model: String,
+    val reply: String = voicePrompt
 )
 
 data class NearbyRiskWarningDto(
@@ -538,6 +544,36 @@ object SmartCaneApiClient {
         }
     }
 
+    suspend fun postVoiceCommand(
+        deviceId: String,
+        audioFile: File,
+        currentLatitude: Double?,
+        currentLongitude: Double?,
+        language: String = "zh-CN"
+    ): ApiResult<VoiceCommandDto> = withContext(Dispatchers.IO) {
+        try {
+            val fields = buildMap {
+                put("device_id", deviceId)
+                put("language", language)
+                currentLatitude?.let { put("current_lat", it.toString()) }
+                currentLongitude?.let { put("current_lng", it.toString()) }
+                put("coordsys", "gps")
+            }
+            ApiResult.Success(
+                postMultipart(
+                    path = "/api/voice/command",
+                    fields = fields,
+                    fileFieldName = "file",
+                    file = audioFile,
+                    fileName = "voice_${System.currentTimeMillis()}.pcm",
+                    contentType = "audio/pcm"
+                ).toVoiceCommandDto()
+            )
+        } catch (exception: Exception) {
+            ApiResult.Failure(exception.toUserMessage())
+        }
+    }
+
     suspend fun getReverseGeocode(latitude: Double, longitude: Double): ApiResult<String> = withContext(Dispatchers.IO) {
         try {
             ApiResult.Success(getJson("/api/map/regeo?lat=$latitude&lng=$longitude&coordsys=gps").optString("formatted_address"))
@@ -549,10 +585,28 @@ object SmartCaneApiClient {
     suspend fun postVoiceCommandAudio(
         deviceId: String,
         audioFile: File,
+        currentLatitude: Double?,
+        currentLongitude: Double?,
         language: String? = "zh"
     ): ApiResult<VoiceCommandDto> = withContext(Dispatchers.IO) {
         try {
-            ApiResult.Success(postMultipartVoiceCommand(deviceId, audioFile, language).toVoiceCommandDto())
+            val fields = buildMap {
+                put("device_id", deviceId)
+                if (!language.isNullOrBlank()) put("language", language)
+                currentLatitude?.let { put("current_lat", it.toString()) }
+                currentLongitude?.let { put("current_lng", it.toString()) }
+                put("coordsys", "gps")
+            }
+            ApiResult.Success(
+                postMultipart(
+                    path = "/api/voice/command",
+                    fields = fields,
+                    fileFieldName = "file",
+                    file = audioFile,
+                    fileName = "voice_${System.currentTimeMillis()}.m4a",
+                    contentType = "audio/mp4"
+                ).toVoiceCommandDto()
+            )
         } catch (exception: Exception) {
             ApiResult.Failure(exception.toUserMessage())
         }
@@ -587,44 +641,42 @@ object SmartCaneApiClient {
         }
     }
 
-    private fun postMultipartVoiceCommand(deviceId: String, audioFile: File, language: String?): JSONObject {
-        val boundary = "SmartCaneBoundary${System.currentTimeMillis()}"
-        val lineEnd = "\r\n"
-        val connection = (URL(ApiConfig.BASE_URL + "/api/voice/command").openConnection() as HttpURLConnection).apply {
+    private fun postMultipart(
+        path: String,
+        fields: Map<String, String>,
+        fileFieldName: String,
+        file: File,
+        fileName: String,
+        contentType: String
+    ): JSONObject {
+        val boundary = "SmartCane-${UUID.randomUUID()}"
+        val connection = (URL(ApiConfig.BASE_URL + path).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             doOutput = true
             connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = 30_000
+            readTimeout = 90_000
             setRequestProperty("Accept", "application/json")
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            setChunkedStreamingMode(0)
         }
-
-        fun OutputStreamWriter.writeFormField(name: String, value: String) {
-            write("--$boundary$lineEnd")
-            write("Content-Disposition: form-data; name=\"$name\"$lineEnd$lineEnd")
-            write(value)
-            write(lineEnd)
-        }
-
         connection.outputStream.use { output ->
-            OutputStreamWriter(output, Charsets.UTF_8).use { writer ->
-                writer.writeFormField("device_id", deviceId)
-                if (!language.isNullOrBlank()) writer.writeFormField("language", language)
-                writer.write("--$boundary$lineEnd")
-                writer.write("Content-Disposition: form-data; name=\"file\"; filename=\"voice.m4a\"$lineEnd")
-                writer.write("Content-Type: audio/mp4$lineEnd$lineEnd")
-                writer.flush()
-                audioFile.inputStream().use { input -> input.copyTo(output) }
-                output.flush()
-                writer.write(lineEnd)
-                writer.write("--$boundary--$lineEnd")
+            fields.forEach { (name, value) ->
+                output.writeUtf8("--$boundary\r\n")
+                output.writeUtf8("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
+                output.writeUtf8(value)
+                output.writeUtf8("\r\n")
             }
+            output.writeUtf8("--$boundary\r\n")
+            output.writeUtf8("Content-Disposition: form-data; name=\"$fileFieldName\"; filename=\"$fileName\"\r\n")
+            output.writeUtf8("Content-Type: $contentType\r\n\r\n")
+            file.inputStream().use { input -> input.copyTo(output) }
+            output.writeUtf8("\r\n--$boundary--\r\n")
         }
-
-        return connection.useJsonConnection { code, body ->
-            if (code in 200..299) JSONObject(body.ifBlank { "{}" }) else throw IllegalStateException(extractError(body, code))
+        return connection.useJsonConnection { code, responseBody ->
+            if (code in 200..299) JSONObject(responseBody.ifBlank { "{}" }) else throw IllegalStateException(extractError(responseBody, code))
         }
     }
+
 
     private fun deleteJson(path: String): JSONObject {
         val connection = (URL(ApiConfig.BASE_URL + path).openConnection() as HttpURLConnection).apply {
@@ -769,7 +821,8 @@ object SmartCaneApiClient {
             longitude = nullableDouble("longitude") ?: nullableDouble("lng"),
             timestamp = optString("timestamp"),
             voicePrompt = optString("voicePrompt", optString("voice_prompt", messageValue)),
-            riskScore = nullableDouble("riskScore") ?: nullableDouble("risk_score")
+            riskScore = nullableDouble("riskScore") ?: nullableDouble("risk_score"),
+            distanceMeters = nullableDouble("distanceM") ?: nullableDouble("distance_m")
         )
     }
 
@@ -786,17 +839,6 @@ object SmartCaneApiClient {
         longitude = nullableDouble("longitude") ?: nullableDouble("lng"),
         timestamp = optString("timestamp")
     )
-
-    private fun JSONObject.toVoiceCommandDto(): VoiceCommandDto {
-        val transcriptText = optString("transcript", optString("text"))
-        val replyText = optString("voice_prompt")
-            .ifBlank { optString("voicePrompt") }
-            .ifBlank { optString("advice") }
-            .ifBlank { optString("message") }
-            .ifBlank { optString("intent") }
-            .ifBlank { "\u5df2\u6536\u5230\u8bed\u97f3\u6307\u4ee4" }
-        return VoiceCommandDto(transcript = transcriptText, reply = replyText)
-    }
 
     private fun JSONObject.toNearbyRiskWarningDtoOrNull(): NearbyRiskWarningDto? {
         if (!optBoolean("found", false)) return null
@@ -943,7 +985,7 @@ object SmartCaneApiClient {
     private fun JSONObject.toAiAdviceDto(): AiAdviceDto {
         val adviceText = cleanText(optString("ai_message"))
             ?: cleanText(optString("advice"))
-            ?: "请慢行，注意附近风险�?
+            ?: "请慢行，注意附近风险。"
         return AiAdviceDto(
             provider = optString("provider", "unknown"),
             model = optString("model", ""),
@@ -964,11 +1006,25 @@ object SmartCaneApiClient {
         )
     }
 
+    private fun JSONObject.toVoiceCommandDto(): VoiceCommandDto {
+        val bestRoute = optJSONObject("best_route") ?: optJSONObject("bestRoute")
+        val stt = optJSONObject("stt")
+        return VoiceCommandDto(
+            transcript = optString("transcript", optString("text", "")),
+            voicePrompt = optString("voice_prompt", optString("voicePrompt", optString("reply", "已收到语音指令"))),
+            routeCount = optInt("route_count", optInt("routeCount")),
+            provider = stt?.optString("provider").orEmpty(),
+            model = stt?.optString("model").orEmpty().ifBlank { bestRoute?.optString("model").orEmpty() },
+            reply = optString("reply", optString("voice_prompt", optString("voicePrompt", "已收到语音指令")))
+        )
+    }
+
     private fun cleanText(value: String?): String? =
         value?.trim()?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
 
     private fun JSONObject.nullableDouble(name: String): Double? = if (has(name) && !isNull(name)) optDouble(name) else null
     private fun JSONObject.nullableInt(name: String): Int? = if (has(name) && !isNull(name)) optInt(name) else null
+    private fun OutputStream.writeUtf8(value: String) = write(value.toByteArray(Charsets.UTF_8))
 
     private fun extractError(body: String, code: Int): String {
         return runCatching {
@@ -987,9 +1043,9 @@ object SmartCaneApiClient {
     private fun String.urlEncode(): String = URLEncoder.encode(this, Charsets.UTF_8.name())
 
     private fun Exception.toUserMessage(): String = when (this) {
-        is java.net.ConnectException -> "无法连接后端，请确认 FastAPI 已启动，并检查手机和电脑是否在同一网络�?
-        is java.net.SocketTimeoutException -> "连接后端超时，请检查网络或后端地址�?
-        is java.net.UnknownHostException -> "找不到后端地址，请�?local.properties 检�?BACKEND_BASE_URL�?
-        else -> message?.takeIf { it.isNotBlank() } ?: "网络请求失败，请稍后重试�?
+        is java.net.ConnectException -> "无法连接后端，请确认 FastAPI 已启动，并检查手机和电脑是否在同一网络。"
+        is java.net.SocketTimeoutException -> "连接后端超时，请检查网络或后端地址。"
+        is java.net.UnknownHostException -> "找不到后端地址，请在 local.properties 检查 BACKEND_BASE_URL。"
+        else -> message?.takeIf { it.isNotBlank() } ?: "网络请求失败，请稍后重试。"
     }
 }

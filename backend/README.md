@@ -16,7 +16,7 @@ py -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env
-uvicorn main:app --host 0.0.0.0 --port 8016
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 ## Environment
@@ -25,8 +25,19 @@ Copy `.env.example` to `.env`, then fill provider keys locally.
 
 Supported LLM providers:
 
+- `LLM_PROVIDER=vei`
 - `LLM_PROVIDER=ark`
 - `LLM_PROVIDER=openai`
+
+For Volcengine VEI AI Gateway / Doubao examples that use
+`https://ai-gateway.vei.volces.com/v1/chat/completions`, configure:
+
+```env
+LLM_PROVIDER=vei
+VEI_API_KEY=...
+VEI_BASE_URL=https://ai-gateway.vei.volces.com/v1
+VEI_MODEL=doubao-1.5-lite-32k
+```
 
 If no key is configured, normal event/location/map APIs still work. AI advice falls back to rule-based text.
 
@@ -155,7 +166,7 @@ Ordinary short obstacle detections remain local/normal risk records and do not p
 }
 ```
 
-The `voice_prompt` field is LLM-enhanced when `ARK_API_KEY` or `OPENAI_API_KEY` is configured, and rule-based otherwise.
+The `voice_prompt` field is LLM-enhanced when `VEI_API_KEY`, `ARK_API_KEY`, or `OPENAI_API_KEY` is configured, and rule-based otherwise.
 
 ## Risk Upload Example
 
@@ -164,9 +175,9 @@ The `voice_prompt` field is LLM-enhanced when `ARK_API_KEY` or `OPENAI_API_KEY` 
   "device_id": "cane_001",
   "lat": 31.2304,
   "lng": 121.4737,
-  "risk_type": "ground_step",
-  "level": "medium",
-  "risk_level": "medium",
+  "risk_type": "ground_drop",
+  "level": "high",
+  "risk_level": "high",
   "direction": "stop",
   "sensor": "tof_down",
   "distance_mm": 950,
@@ -174,7 +185,7 @@ The `voice_prompt` field is LLM-enhanced when `ARK_API_KEY` or `OPENAI_API_KEY` 
   "front_cm": 180,
   "left_cm": 130,
   "right_cm": 120,
-  "down_cm": 50,
+  "down_cm": 95,
   "extra_json": "source=auto_detected"
 }
 ```
@@ -187,7 +198,7 @@ The `voice_prompt` field is LLM-enhanced when `ARK_API_KEY` or `OPENAI_API_KEY` 
   "lat": 31.2304,
   "lng": 121.4737,
   "risk_type": "front_obstacle",
-  "risk_level": "low",
+  "risk_level": "medium",
   "front_cm": 75,
   "left_cm": 130,
   "right_cm": 55,
@@ -198,7 +209,7 @@ The `voice_prompt` field is LLM-enhanced when `ARK_API_KEY` or `OPENAI_API_KEY` 
 }
 ```
 
-The model is `tiny-mlp-risk-tier-v2`, implemented in `backend/deep_model.py`. It runs on the backend only; ESP32-C5 local obstacle avoidance remains rule-based and offline-safe.
+The model is `tiny-mlp-risk-v1`, implemented in `backend/deep_model.py`. It runs on the backend only; ESP32-C5 local obstacle avoidance remains rule-based and offline-safe.
 
 ## Collaborative Run
 

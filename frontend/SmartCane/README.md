@@ -29,7 +29,7 @@ The app polls `/api/alerts/latest` every few seconds on the blind and companion 
 
 ## Backend Address
 
-The committed default backend is the local FastAPI service for the current bench network:
+The committed default backend is the shared cloud FastAPI service:
 
 ```properties
 BACKEND_BASE_URL=http://118.31.221.165:8016
@@ -44,13 +44,13 @@ D:\smartcane\frontend\SmartCane\local.properties
 For a real Android phone on the same Wi-Fi as a local computer:
 
 ```properties
-BACKEND_BASE_URL=http://118.31.221.165:8016
+BACKEND_BASE_URL=http://192.168.1.13:8000
 ```
 
 For the Android Emulator:
 
 ```properties
-BACKEND_BASE_URL=http://118.31.221.165:8016
+BACKEND_BASE_URL=http://10.0.2.2:8000
 ```
 
 If `local.properties` contains `BACKEND_BASE_URL`, it overrides the committed cloud default.
@@ -83,22 +83,22 @@ cd D:\smartcane\backend
 py -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8016
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 Open this on the computer:
 
 ```text
-http://118.31.221.165:8016/status
+http://127.0.0.1:8000/status
 ```
 
 Open this on the phone browser, replacing the IP if needed:
 
 ```text
-http://118.31.221.165:8016/status
+http://192.168.1.13:8000/status
 ```
 
-If the phone cannot open it, check that phone and computer are on the same network and Windows Firewall allows Python/Uvicorn on port `8016`.
+If the phone cannot open it, check that phone and computer are on the same network and Windows Firewall allows Python/Uvicorn on port `8000`.
 
 ## Open Android Project
 

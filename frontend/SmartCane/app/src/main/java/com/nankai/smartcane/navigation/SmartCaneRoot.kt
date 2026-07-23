@@ -163,8 +163,9 @@ fun SmartCaneRootApp() {
                 message = uiState.message,
                 voiceTranscript = uiState.voiceTranscript,
                 urgentAlert = uiState.urgentAlert,
-                onVoiceStart = controller::startVoiceInput,
-                onVoiceStop = controller::stopVoiceInput,
+                onVoicePressStart = controller::startVoicePress,
+                onVoicePressEnd = controller::endVoicePress,
+                onRepeat = controller::repeatNavigationPrompt,
                 onSos = controller::sendBlindSos,
                 onDismissAlert = controller::dismissUrgentAlert,
                 onOpenSettings = { route = AppRoute.BlindPairing }
