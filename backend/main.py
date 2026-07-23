@@ -32,13 +32,17 @@ LEVEL_RANK = {"low": 0, "medium": 1, "high": 2}
 DEVICE_OFFLINE_SECONDS = 60
 AMAP_BASE_URL = "https://restapi.amap.com/v3"
 
-FRONT_WARN_CM = 120
-FRONT_DANGER_CM = 80
-SIDE_SAFE_CM = 70
-SIDE_NEAR_CM = 40
-GROUND_BASE_CM = 45
-GROUND_UNEVEN_THRESHOLD_CM = 25
-GROUND_DROP_THRESHOLD_CM = 45
+FRONT_WARN_CM = 110
+FRONT_DANGER_CM = 35
+SIDE_SAFE_CM = 60
+SIDE_NEAR_CM = 20
+SIDE_DANGER_CM = 12
+SIDE_BLOCKED_CM = 18
+GROUND_BASE_CM = 55
+GROUND_DROP_THRESHOLD_CM = 95
+DOWN_OBSTACLE_CM = 20
+DOWN_STEP_EDGE_MIN_CM = 45
+DOWN_STEP_EDGE_MAX_CM = 90
 DEFAULT_NEARBY_RADIUS_M = 80.0
 ROUTE_RISK_BUFFER_M = 8.0
 WALKING_NAVIGATION_MAX_DISTANCE_M = 3000.0
@@ -99,9 +103,12 @@ HARDWARE_PROFILE: dict[str, Any] = {
         "front_danger": FRONT_DANGER_CM,
         "side_safe": SIDE_SAFE_CM,
         "side_near": SIDE_NEAR_CM,
+        "side_danger": SIDE_DANGER_CM,
         "ground_base": GROUND_BASE_CM,
-        "ground_uneven_threshold": GROUND_UNEVEN_THRESHOLD_CM,
         "ground_drop_threshold": GROUND_DROP_THRESHOLD_CM,
+        "down_obstacle": DOWN_OBSTACLE_CM,
+        "down_step_edge_min": DOWN_STEP_EDGE_MIN_CM,
+        "down_step_edge_max": DOWN_STEP_EDGE_MAX_CM,
     },
 }
 
@@ -1115,6 +1122,7 @@ MAPPABLE_RISK_TYPES = {
     "left_obstacle",
     "right_obstacle",
     "ground_drop",
+    "ground_step",
     "down_obstacle",
     "user_mark",
     "history_risk",
@@ -1126,7 +1134,7 @@ MAPPABLE_RISK_TYPES = {
 
 
 def risk_point_ttl_seconds(risk_type: str, level: str) -> int:
-    if risk_type in {"ground_drop", "user_mark", "history_risk"}:
+    if risk_type in {"ground_drop", "ground_step", "user_mark", "history_risk"}:
         return RISK_POINT_FIXED_TTL_SECONDS
     if risk_type in {"sos", "fall_detected"}:
         return RISK_POINT_EMERGENCY_TTL_SECONDS
@@ -1552,13 +1560,20 @@ def risk_level_from_score(score: float) -> str:
 def risk_level_for_analysis(risk_type: str, score: float) -> str:
     if risk_type in {"sos", "fall_detected"}:
         return "high"
-    if risk_type == "none" or score <= 0:
+    if risk_type in {"ground_drop", "ground_step", "user_mark"}:
+        return "medium" if score > 0 else "low"
+    if risk_type in {
+        "front_obstacle",
+        "left_obstacle",
+        "right_obstacle",
+        "down_obstacle",
+        "history_risk",
+        "prolonged_obstacle",
+        "approaching_obstacle",
+        "voice_request",
+    }:
         return "low"
-    if risk_type in {"user_mark", "history_risk", "prolonged_obstacle", "approaching_obstacle"} and score >= 40:
-        return "medium"
-    if score >= 50:
-        return "medium"
-    return "low"
+    return risk_level_from_score(score)
 
 
 def primary_distance_mm(risk_type: str, frame: SensorFrameCreate) -> Optional[int]:
@@ -1568,7 +1583,7 @@ def primary_distance_mm(risk_type: str, frame: SensorFrameCreate) -> Optional[in
         return frame.left_cm * 10
     if risk_type == "right_obstacle" and frame.right_cm is not None:
         return frame.right_cm * 10
-    if risk_type in {"ground_drop", "down_obstacle", "fall_detected"} and frame.down_cm is not None:
+    if risk_type in {"ground_drop", "ground_step", "down_obstacle", "fall_detected"} and frame.down_cm is not None:
         return frame.down_cm * 10
     if risk_type in {"prolonged_obstacle", "approaching_obstacle"} and frame.front_cm is not None:
         return frame.front_cm * 10
@@ -1579,19 +1594,19 @@ def front_score(front_cm: Optional[int]) -> float:
     if front_cm is None:
         return 0.0
     if front_cm < FRONT_DANGER_CM:
-        return clamp(60 + (FRONT_DANGER_CM - front_cm) * 0.20, 60, 69)
+        return clamp(72 + (FRONT_DANGER_CM - front_cm) * 0.35, 72, 90)
     if front_cm < FRONT_WARN_CM:
-        return clamp(28 + (FRONT_WARN_CM - front_cm) * 0.30, 28, 49)
+        return clamp(10 + (FRONT_WARN_CM - front_cm) * 0.24, 10, 32)
     return 0.0
 
 
 def side_score(side_cm: Optional[int]) -> float:
     if side_cm is None:
         return 0.0
+    if side_cm < SIDE_DANGER_CM:
+        return clamp(24 + (SIDE_DANGER_CM - side_cm) * 0.70, 24, 35)
     if side_cm < SIDE_NEAR_CM:
-        return clamp(56 + (SIDE_NEAR_CM - side_cm) * 0.28, 56, 66)
-    if side_cm < SIDE_SAFE_CM:
-        return clamp(25 + (SIDE_SAFE_CM - side_cm) * 0.35, 25, 46)
+        return clamp(12 + (SIDE_NEAR_CM - side_cm) * 1.70, 12, 24)
     return 0.0
 
 
@@ -1599,33 +1614,48 @@ def ground_score(down_cm: Optional[int]) -> float:
     if down_cm is None:
         return 0.0
     drop_threshold = GROUND_BASE_CM + GROUND_DROP_THRESHOLD_CM
-    uneven_threshold = GROUND_BASE_CM + GROUND_UNEVEN_THRESHOLD_CM
     if down_cm > drop_threshold:
-        return clamp(62 + (down_cm - drop_threshold) * 0.12, 62, 69)
-    if down_cm > uneven_threshold:
-        return clamp(32 + (down_cm - uneven_threshold) * 0.42, 32, 49)
+        return clamp(48 + (down_cm - drop_threshold) * 0.12, 48, 68)
+    return 0.0
+
+
+def down_obstacle_score(down_cm: Optional[int]) -> float:
+    if down_cm is None:
+        return 0.0
+    if down_cm < DOWN_OBSTACLE_CM:
+        return clamp(12 + (DOWN_OBSTACLE_CM - down_cm) * 0.80, 12, 28)
+    return 0.0
+
+
+def ground_step_score(down_cm: Optional[int]) -> float:
+    if down_cm is None:
+        return 0.0
+    if down_cm < DOWN_OBSTACLE_CM:
+        return clamp(45 + (DOWN_OBSTACLE_CM - down_cm) * 1.00, 45, 62)
+    if DOWN_STEP_EDGE_MIN_CM <= down_cm <= DOWN_STEP_EDGE_MAX_CM:
+        return clamp(56 - abs(down_cm - 50) * 0.30, 45, 56)
     return 0.0
 
 
 def history_score(history: dict[str, Any]) -> float:
     return clamp(
-        history.get("high_count", 0) * 16
-        + history.get("medium_count", 0) * 8
-        + history.get("risk_count", 0) * 2,
+        history.get("high_count", 0) * 2
+        + history.get("medium_count", 0) * 1.5
+        + history.get("risk_count", 0) * 0.2,
         0,
-        35,
+        10,
     )
 
 
 def choose_direction(frame: SensorFrameCreate, risk_type: str, level: str) -> str:
     if risk_type == "voice_request":
         return "none"
-    if risk_type in {"ground_drop", "fall_detected", "sos"}:
+    if risk_type in {"ground_drop", "ground_step", "fall_detected", "sos"}:
         return "stop"
     if risk_type == "prolonged_obstacle":
         return "stop"
     if risk_type == "approaching_obstacle":
-        return "slow" if level == "medium" else "stop"
+        return "slow"
     if risk_type == "down_obstacle":
         return "slow"
     if risk_type == "left_obstacle":
@@ -1684,45 +1714,47 @@ def feedback_for_risk(risk_type: str, level: str, direction: str) -> dict[str, A
         }
     if risk_type == "prolonged_obstacle":
         return {
-            "buzzer": {"enabled": False, "beeps": 0, "pattern": "companion_attention"},
-            "vibration": {"left": 0, "right": 0, "center": 60, "duration_ms": 300},
+            "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
+            "vibration": {"left": 0, "right": 0, "center": 45, "duration_ms": 300},
             "action": "notify_companion",
         }
     if risk_type == "approaching_obstacle":
         return {
-            "buzzer": {"enabled": level == "high", "beeps": 2, "pattern": "approaching_obstacle"},
-            "vibration": {"left": 0, "right": 0, "center": 80 if level == "high" else 45, "duration_ms": 350},
-            "action": "slow_or_stop",
+            "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
+            "vibration": {"left": 0, "right": 0, "center": 45, "duration_ms": 350},
+            "action": "slow",
         }
-    if risk_type == "ground_drop":
+    if risk_type in {"ground_drop", "ground_step"}:
         return {
-            "buzzer": {"enabled": False, "beeps": 0, "pattern": "ground_drop"},
-            "vibration": {"left": 90, "right": 90, "center": 100, "duration_ms": 900},
+            "buzzer": {"enabled": True, "beeps": 2, "pattern": risk_type},
+            "vibration": {"left": 70, "right": 70, "center": 85, "duration_ms": 650},
             "action": "stop",
         }
     if risk_type == "down_obstacle":
         return {
-            "buzzer": {"enabled": level == "high", "beeps": 1, "pattern": "down_obstacle"},
-            "vibration": {"left": 45, "right": 45, "center": 75, "duration_ms": 400},
+            "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
+            "vibration": {"left": 30, "right": 30, "center": 45, "duration_ms": 300},
             "action": "slow",
         }
     if risk_type in {"front_obstacle", "left_obstacle", "right_obstacle"}:
-        motors = {"left": 0, "right": 0, "center": 70 if level == "medium" else 100}
+        center_level = 45 if level == "low" else (70 if level == "medium" else 100)
+        side_level = 45 if level == "low" else 80
+        motors = {"left": 0, "right": 0, "center": center_level}
         if direction in {"turn_left", "keep_left"}:
-            motors["left"] = 80
+            motors["left"] = side_level
         elif direction in {"turn_right", "keep_right"}:
-            motors["right"] = 80
+            motors["right"] = side_level
         elif direction == "stop":
-            motors = {"left": 100, "right": 100, "center": 100}
+            motors = {"left": side_level, "right": side_level, "center": center_level}
         return {
-            "buzzer": {"enabled": level == "high", "beeps": 2, "pattern": "obstacle"},
-            "vibration": {**motors, "duration_ms": 350 if level == "medium" else 650},
+            "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
+            "vibration": {**motors, "duration_ms": 280 if level == "low" else 350},
             "action": direction,
         }
     if risk_type == "history_risk":
         return {
-            "buzzer": {"enabled": level == "high", "beeps": 1, "pattern": "history"},
-            "vibration": {"left": 0, "right": 0, "center": 55, "duration_ms": 300},
+            "buzzer": {"enabled": False, "beeps": 0, "pattern": "none"},
+            "vibration": {"left": 0, "right": 0, "center": 35, "duration_ms": 250},
             "action": "slow",
         }
     if risk_type == "user_mark":
@@ -1747,7 +1779,7 @@ def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, 
         return "同一障碍持续出现，已通知陪护端，请停止并重新探测前方。"
     if risk_type == "approaching_obstacle":
         return "障碍距离正在缩短，请立即减速，必要时停止前进。"
-    if risk_type == "ground_drop":
+    if risk_type in {"ground_drop", "ground_step"}:
         return f"下方距离约 {frame.down_cm or '-'} 厘米，可能有台阶或坑洼，请停止。"
     if risk_type == "front_obstacle":
         if direction == "turn_left":
@@ -1766,6 +1798,56 @@ def voice_prompt_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, 
     return "当前传感器未发现明显障碍，请继续谨慎前进。"
 
 
+def risk_reason_for_risk(frame: SensorFrameCreate, risk_type: str, level: str, score: float) -> str:
+    if risk_type == "ground_step":
+        return f"down distance {frame.down_cm or '-'}cm matched step threshold: <{DOWN_OBSTACLE_CM}cm or {DOWN_STEP_EDGE_MIN_CM}-{DOWN_STEP_EDGE_MAX_CM}cm lower-edge zone"
+    if risk_type == "none" or score <= 0:
+        return "四路测距和 IMU 未发现需要提醒的风险"
+    if risk_type == "voice_request":
+        return "盲杖按钮短按，请求手机端语音输入"
+    if risk_type == "sos":
+        return "盲杖 SOS 长按触发"
+    if risk_type == "fall_detected":
+        return f"BMI270 检测到疑似跌倒，阶段={frame.fall_stage or '-'}，置信度={frame.fall_confidence if frame.fall_confidence is not None else '-'}"
+    if risk_type == "prolonged_obstacle":
+        return "同一方向障碍持续存在，超过陪护端通知阈值"
+    if risk_type == "approaching_obstacle":
+        return "前方距离在一段时间内持续缩短，存在逼近风险"
+    if risk_type == "ground_drop":
+        return f"下视距离 {frame.down_cm or '-'}cm 超过地面基准 {GROUND_BASE_CM}cm + 落差阈值 {GROUND_DROP_THRESHOLD_CM}cm"
+    if risk_type == "down_obstacle":
+        return f"下视距离 {frame.down_cm or '-'}cm 小于近地障碍阈值 {DOWN_OBSTACLE_CM}cm"
+    if risk_type == "front_obstacle":
+        return f"前方距离 {frame.front_cm or '-'}cm 小于斜持盲杖前向阈值 {FRONT_WARN_CM}/{FRONT_DANGER_CM}cm"
+    if risk_type == "left_obstacle":
+        return f"左侧距离 {frame.left_cm or '-'}cm 小于侧向扫杖阈值 {SIDE_NEAR_CM}/{SIDE_DANGER_CM}cm"
+    if risk_type == "right_obstacle":
+        return f"右侧距离 {frame.right_cm or '-'}cm 小于侧向扫杖阈值 {SIDE_NEAR_CM}/{SIDE_DANGER_CM}cm"
+    if risk_type == "history_risk":
+        return "当前位置附近存在多人历史高风险记录"
+    if risk_type == "user_mark":
+        return "用户通过触控/按钮主动标记风险点"
+    return f"{risk_type} risk score={score:.1f} level={level}"
+
+
+def map_weight_for_risk(risk_type: str, level: str, score: float) -> float:
+    if risk_type in {"fall_detected", "sos"}:
+        return 100.0
+    if risk_type in {"ground_drop", "ground_step"}:
+        return clamp(score, 55, 75)
+    if risk_type == "user_mark":
+        return 60.0
+    if risk_type == "prolonged_obstacle":
+        return 24.0
+    if risk_type == "approaching_obstacle":
+        return 22.0
+    if risk_type == "down_obstacle":
+        return 12.0
+    if risk_type in {"front_obstacle", "left_obstacle", "right_obstacle"}:
+        return 8.0
+    return 0.0
+
+
 def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> dict[str, Any]:
     if frame.button_event == "short_press" or frame.alert_type == "voice_request" or frame.manual_risk_type == "voice_request":
         risk_type = "voice_request"
@@ -1775,10 +1857,10 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
         score = 100.0
     elif frame.manual_risk_type in {"fall_detected", "prolonged_obstacle", "approaching_obstacle"}:
         risk_type = frame.manual_risk_type
-        score = 100.0 if risk_type == "fall_detected" else (88.0 if risk_type == "prolonged_obstacle" else 76.0)
+        score = 100.0 if risk_type == "fall_detected" else (34.0 if risk_type == "prolonged_obstacle" else 30.0)
     elif frame.alert_type in {"fall_detected", "prolonged_obstacle", "approaching_obstacle"}:
         risk_type = frame.alert_type
-        score = 100.0 if risk_type == "fall_detected" else (88.0 if risk_type == "prolonged_obstacle" else 76.0)
+        score = 100.0 if risk_type == "fall_detected" else (34.0 if risk_type == "prolonged_obstacle" else 30.0)
     elif imu_fall_score(frame) > 0:
         risk_type = "fall_detected"
         score = imu_fall_score(frame)
@@ -1791,28 +1873,39 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
             "left_obstacle": side_score(frame.left_cm),
             "right_obstacle": side_score(frame.right_cm),
             "ground_drop": ground_score(frame.down_cm),
+            "ground_step": ground_step_score(frame.down_cm),
         }
         risk_type, score = max(scores.items(), key=lambda item: item[1])
         hist_score = history_score(history)
         if score <= 0 and history.get("high_count", 0) >= 2:
             risk_type = "history_risk"
-            score = 48 + min(history.get("high_count", 0) * 5, 20)
+            score = 18 + min(history.get("high_count", 0) * 1.5, 10)
         elif score > 0:
-            score = max(score, min(100.0, score + hist_score * 0.35))
+            score = max(score, min(100.0, score + hist_score * 0.12))
 
-    level = risk_level_for_analysis(risk_type if score > 0 else "none", score)
-    direction = choose_direction(frame, risk_type, level)
-    feedback = feedback_for_risk(risk_type, level, direction)
+    public_risk_type = risk_type if score > 0 else "none"
+    level = risk_level_for_analysis(public_risk_type, score)
+    direction = choose_direction(frame, public_risk_type, level)
+    feedback = feedback_for_risk(public_risk_type, level, direction)
+    reason = risk_reason_for_risk(frame, public_risk_type, level, score)
+    map_weight = round(map_weight_for_risk(public_risk_type, level, score), 1)
     return {
-        "risk_type": risk_type if score > 0 else "none",
+        "risk_type": public_risk_type,
         "risk_level": level,
         "risk_score": round(score, 1),
+        "map_weight": map_weight,
+        "mapWeight": map_weight,
+        "risk_reason": reason,
+        "riskReason": reason,
+        "risk_source_detail": reason,
+        "riskSourceDetail": reason,
         "direction": direction,
         "sensor": {
             "front_obstacle": "tof_front",
             "left_obstacle": "tof_left",
             "right_obstacle": "tof_right",
             "ground_drop": "tof_down",
+            "ground_step": "tof_down",
             "user_mark": "touch",
             "sos": "sos_button",
             "fall_detected": "bmi270_imu",
@@ -1820,9 +1913,9 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
             "prolonged_obstacle": "tof_trend",
             "approaching_obstacle": "tof_trend",
             "history_risk": "backend_history",
-        }.get(risk_type, "none"),
-        "distance_mm": primary_distance_mm(risk_type, frame),
-        "voice_prompt": voice_prompt_for_risk(frame, risk_type, level, direction),
+        }.get(public_risk_type, "none"),
+        "distance_mm": primary_distance_mm(public_risk_type, frame),
+        "voice_prompt": voice_prompt_for_risk(frame, public_risk_type, level, direction),
         "feedback": feedback,
         "nearby_history": {
             "risk_count": history.get("risk_count", 0),
@@ -1836,18 +1929,15 @@ def analyze_sensor_frame(frame: SensorFrameCreate, history: dict[str, Any]) -> d
 def should_store_sensor_analysis(analysis: dict[str, Any]) -> bool:
     if analysis["risk_type"] in {"voice_request", "user_mark", "sos", "fall_detected"}:
         return True
+    if analysis["risk_type"] in {"ground_drop", "ground_step"}:
+        return float(analysis.get("map_weight") or 0) >= 55
     return analysis["risk_type"] in {
         "front_obstacle",
         "left_obstacle",
         "right_obstacle",
-        "ground_drop",
-        "user_mark",
-        "sos",
-        "fall_detected",
-        "voice_request",
         "prolonged_obstacle",
         "approaching_obstacle",
-    } and analysis["risk_level"] in {"medium", "high"}
+    } and float(analysis.get("map_weight") or 0) >= 60 and analysis["risk_level"] in {"medium", "high"}
 
 
 def amap_key() -> str:
@@ -3062,7 +3152,11 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
                     "accel_y_g": frame.accel_y_g,
                     "accel_z_g": frame.accel_z_g,
                     "accel_total_g": frame.accel_total_g,
-                    "hardware_profile": "esp32c5_tca_ch2_3_4_5_mpr121_ch7_pca9685_ch8_9_10_bmi270",
+                    "hardware_profile": "esp32c5_tca_ch2_3_4_5_mpr121_ch7_pca9685_ch0_1_2_bmi270",
+                    "risk_reason": analysis.get("risk_reason"),
+                    "riskReason": analysis.get("riskReason"),
+                    "map_weight": analysis.get("map_weight"),
+                    "mapWeight": analysis.get("mapWeight"),
                     "nearby_history": analysis["nearby_history"],
                     "extra": frame.extra,
                 },
@@ -3073,6 +3167,7 @@ def create_sensor_frame(frame: SensorFrameCreate, lite: bool = Query(False)) -> 
             "[SMARTCANE] event "
             f"id={stored_event['id']} device={stored_event['device_id']} "
             f"type={stored_event['risk_type']} level={stored_event['risk_level']} "
+            f"map_weight={analysis.get('map_weight')} reason={analysis.get('risk_reason')} "
             f"front={stored_event['front_cm']} left={stored_event['left_cm']} "
             f"right={stored_event['right_cm']} down={stored_event['down_cm']}",
             flush=True,
