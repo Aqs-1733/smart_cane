@@ -660,8 +660,9 @@ class SmartCaneAppController private constructor(
         val isFall = riskType == "fall_detected"
         if (!isFall) {
             if (level == "low") return
-            if (riskType.contains("left") || riskType.contains("right")) return
-            if (riskType.contains("front") && (state.frontCm == null || state.frontCm > 40)) return
+            if (riskType.contains("left") && level != "high" && (state.leftCm == null || state.leftCm > 35)) return
+            if (riskType.contains("right") && level != "high" && (state.rightCm == null || state.rightCm > 35)) return
+            if (riskType.contains("front") && level != "high" && (state.frontCm == null || state.frontCm > 40)) return
         }
 
         val now = System.currentTimeMillis()
@@ -703,7 +704,8 @@ class SmartCaneAppController private constructor(
         return when {
             riskType == "fall_detected" -> "检测到跌倒"
             riskType.contains("front") -> state.frontCm?.let { "前方${it}厘米有障碍" }
-            riskType.contains("left") || riskType.contains("right") -> null
+            riskType.contains("left") -> state.leftCm?.let { "左侧${it}厘米有障碍，请向右保持距离" }
+            riskType.contains("right") -> state.rightCm?.let { "右侧${it}厘米有障碍，请向左保持距离" }
             riskType.contains("ground") || riskType.contains("drop") -> "前方存在落差，请立即停下并探测台阶"
             riskType.contains("down_sensor") -> "下视传感器异常，请停下检查"
             riskType.contains("obstacle") -> nearestHardwareObstaclePrompt(state)

@@ -1785,10 +1785,9 @@ def risk_level_for_analysis(risk_type: str, score: float) -> str:
         return "high"
     if risk_type in {"ground_drop", "ground_step", "ground_step_down", "ground_step_up", "down_no_target", "down_sensor_unavailable", "user_mark"}:
         return "medium" if score > 0 else "low"
+    if risk_type in {"front_obstacle", "left_obstacle", "right_obstacle"}:
+        return risk_level_from_score(score)
     if risk_type in {
-        "front_obstacle",
-        "left_obstacle",
-        "right_obstacle",
         "down_obstacle",
         "history_risk",
         "prolonged_obstacle",
@@ -1816,7 +1815,7 @@ def primary_distance_mm(risk_type: str, frame: SensorFrameCreate) -> Optional[in
 def front_score(front_cm: Optional[int]) -> float:
     if front_cm is None:
         return 0.0
-    if front_cm < FRONT_DANGER_CM:
+    if front_cm <= FRONT_DANGER_CM:
         return clamp(72 + (FRONT_DANGER_CM - front_cm) * 0.35, 72, 90)
     if front_cm < FRONT_WARN_CM:
         return clamp(10 + (FRONT_WARN_CM - front_cm) * 0.24, 10, 32)
@@ -1826,8 +1825,8 @@ def front_score(front_cm: Optional[int]) -> float:
 def side_score(side_cm: Optional[int]) -> float:
     if side_cm is None:
         return 0.0
-    if side_cm < SIDE_DANGER_CM:
-        return clamp(24 + (SIDE_DANGER_CM - side_cm) * 0.70, 24, 35)
+    if side_cm <= SIDE_DANGER_CM:
+        return clamp(72 + (SIDE_DANGER_CM - side_cm) * 0.70, 72, 90)
     if side_cm < SIDE_NEAR_CM:
         return clamp(12 + (SIDE_NEAR_CM - side_cm) * 1.70, 12, 24)
     return 0.0
@@ -2036,6 +2035,12 @@ def map_weight_for_risk(risk_type: str, level: str, score: float) -> float:
     if risk_type == "down_obstacle":
         return 12.0
     if risk_type in {"front_obstacle", "left_obstacle", "right_obstacle"}:
+        # Only confirmed medium/high obstacle events become shared map points.
+        # Low-level sweep noise remains local vibration-only.
+        if level == "high":
+            return clamp(score, 70, 90)
+        if level == "medium":
+            return clamp(score, 60, 75)
         return 8.0
     return 0.0
 

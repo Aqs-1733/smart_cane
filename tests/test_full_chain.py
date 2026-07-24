@@ -280,3 +280,23 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "cm >= SMARTCANE_DOWN_NO_TARGET_CM" in firmware
     assert "fall_pending" in sketch and "fall_detected" in sketch
     assert "fallRiskSuppressUntilMs" in sketch
+
+
+def test_medium_and_high_obstacles_can_become_shared_risk_points():
+    assert main.map_weight_for_risk("left_obstacle", "low", 25.0) == 8.0
+    assert main.map_weight_for_risk("right_obstacle", "medium", 62.0) >= 60.0
+    assert main.map_weight_for_risk("front_obstacle", "high", 80.0) >= 70.0
+    assert main.should_store_sensor_analysis({
+        "risk_type": "right_obstacle",
+        "risk_level": "medium",
+        "map_weight": 62.0,
+    })
+    main.reset_runtime_detectors()
+    analysis = main.analyze_sensor_frame(
+        frame(55, right_cm=20, down_raw_cm=55, down_valid=True, down_status="valid"),
+        {"risk_count": 0, "high_count": 0, "medium_count": 0, "max_level": "low"},
+    )
+    assert analysis["risk_type"] == "right_obstacle"
+    assert analysis["risk_level"] == "high"
+    assert analysis["map_weight"] >= 70
+    assert main.should_store_sensor_analysis(analysis)
