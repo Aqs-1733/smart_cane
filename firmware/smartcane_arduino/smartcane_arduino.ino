@@ -42,7 +42,6 @@ static unsigned long lastStatusMs = 0;
 static unsigned long lastFeedbackMs = 0;
 static unsigned long lastLocationUploadMs = 0;
 static unsigned long lastNearbyFetchMs = 0;
-static unsigned long lastDeepRiskMs = 0;
 static unsigned long lastTelemetryUploadMs = 0;
 static unsigned long lastHeartbeatMs = 0;
 static String serialLine;
@@ -356,21 +355,11 @@ static bool updateRiskFeedbackGate(const RiskState &risk, bool &persistent) {
     return true;
   }
 
-  // A confirmed stair/drop stays active while the cane adopts its new ground
-  // baseline.  It has already produced its one physical cue; repeating that
-  // cue every second makes a stationary demo sound like a fault.
-  if (isGroundFeedbackRisk(risk)) {
-    return false;
-  }
-
-  if (now - riskFeedbackStartedMs >= SMARTCANE_RISK_PERSISTENT_FEEDBACK_MS &&
-      now - lastPersistentFeedbackMs >= SMARTCANE_RISK_PERSISTENT_REPEAT_MS) {
-    activeFeedbackRisk = risk;
-    lastPersistentFeedbackMs = now;
-    persistent = true;
-    return true;
-  }
-
+  // Every ordinary physical risk is a one-shot cue.  Repeating an unchanged
+  // obstacle every 1.2 seconds made the single motor and buzzer sound like a
+  // continuous alert, flooded network events, and delayed following ToF
+  // frames.  A changed risk, or the same risk after a real clear/rearm,
+  // still reaches the `isNewObstacle` branch above.
   return false;
 }
 
@@ -518,7 +507,7 @@ static void runCue(FeedbackCue cue, bool withBuzzer) {
   switch (cue) {
     case CUE_GROUND_DROP:
       patternGroundDrop();
-      if (withBuzzer) beepPatternDanger();
+      if (withBuzzer) beep(SMARTCANE_BEEP_SHORT_MS);
       break;
     case CUE_TURN_LEFT:
       patternTurnLeft();
@@ -530,7 +519,7 @@ static void runCue(FeedbackCue cue, bool withBuzzer) {
       break;
     case CUE_STOP:
       patternStop();
-      if (withBuzzer) beepPatternDanger();
+      if (withBuzzer) beep(SMARTCANE_BEEP_SHORT_MS);
       break;
     case CUE_SOS:
       patternSos();
@@ -1097,10 +1086,9 @@ static void publishRiskEventIfNeeded(const RiskState &risk) {
     // Normal risk upload is intentionally deferred until after runCue() in
     // publishLocalCueEvent(), so one physical cue creates one event and does
     // not add a second synchronous HTTP POST before the next IMU sample.
-    if (risk.level == RISK_HIGH && networkMode && networkAvailable()) {
-      lastDeepRiskMs = millis();
-      fetchDeepRisk(risk, distances, location, deepRisk);
-    }
+    // Deep-risk inference remains available through the explicit `deep`
+    // command, but is not called automatically here: it may take seconds and
+    // must never hold the real-time stair/fall safety loop.
   }
 
   lastEventRisk = risk;

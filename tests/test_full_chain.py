@@ -120,11 +120,29 @@ def test_firmware_sweep_filter_keeps_stairs_distinct_from_front_risers():
     assert "step_candidate_waiting_normal_use" in ground
     assert "cane_motion_no_ground_candidate" in ground
     assert "const bool candidateFromMotion" in ground
+    assert "static const char *confirmGroundCandidate" in ground
+    assert "rememberDirection(direction);" in ground
+    assert "if (poseNearNormal && directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES)" in ground
+    assert "!caneMotion && directionVotes(direction)" not in ground
+    assert "cane_motion_candidate_cleared_below_threshold" in ground
     assert "startup_normal_use_settling" in ground
     assert "down_transient_read_ignored" in ground
     assert "step_candidate_waiting_stable_normal_use" in ground
     assert "if (!groundCandidateActive && d.frontValid" in ground
     assert "if (!isGroundRisk(candidate.riskType) && isGroundRisk(best.riskType))" in ground
+
+
+def test_firmware_ordinary_cues_are_one_shot_and_network_bounded():
+    config = (ROOT / "firmware" / "smartcane_arduino" / "config.h").read_text(encoding="utf-8")
+    sketch = (ROOT / "firmware" / "smartcane_arduino" / "smartcane_arduino.ino").read_text(encoding="utf-8")
+    network = (ROOT / "firmware" / "smartcane_arduino" / "network_client.cpp").read_text(encoding="utf-8")
+    gate = sketch[sketch.index("static bool updateRiskFeedbackGate"):sketch.index("static bool isDistanceRiskType")]
+    assert "SMARTCANE_EVENT_HTTP_TIMEOUT_MS 300" in config
+    assert "SMARTCANE_SENSOR_FRAME_HTTP_TIMEOUT_MS 350" in config
+    assert "if (strncmp(path, \"/api/risk-events\"" in network
+    assert "SMARTCANE_EVENT_HTTP_TIMEOUT_MS" in network
+    assert "SMARTCANE_RISK_PERSISTENT_REPEAT_MS" not in gate
+    assert "beepPatternDanger();" not in sketch[sketch.index("static void runCue"):sketch.index("static FeedbackCue cueForRisk")]
 
 
 def test_fall_lock_suppresses_distance_feedback_without_time_cooldown(tmp_path, monkeypatch):
@@ -577,9 +595,11 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "SMARTCANE_FALL_NORMAL_USE_LAUNCH_WINDOW_MS 1200" in config
     assert "bool normalUseArmed = normalUseReady" in imu
     assert "bool rapidTiltStart = angleFromBaseline >= SMARTCANE_FALL_FAST_ANGLE_DEG" in imu
-    assert "bool impactAssistedTiltStart = (accelTrigger || jerkTrigger)" in imu
-    assert "bool impactCandidateStart = accelTrigger || jerkTrigger;" in imu
-    assert "normal_use_accel_lock_waiting_lying" in imu
+    assert "float verticalAccelG = baseMag > 0.01f ? dot / baseMag : state.totalG;" in imu
+    assert "bool verticalAccelTrigger = verticalAccelG > SMARTCANE_FALL_ACCEL_HIGH_G" in imu
+    assert "bool impactAssistedTiltStart = (verticalAccelTrigger || verticalJerkTrigger)" in imu
+    assert "bool impactCandidateStart = verticalAccelTrigger || verticalJerkTrigger;" in imu
+    assert "normal_use_vertical_accel_lock_waiting_lying" in imu
     assert "bool directLyingTransitionStart = angleFromBaseline >= SMARTCANE_FALL_LYING_ANGLE_DEG" in imu
     assert "normal_use_rapid_tilt_lock_waiting_lying" in imu
     assert "normal_use_direct_lying_tilt_lock_waiting_lying" in imu

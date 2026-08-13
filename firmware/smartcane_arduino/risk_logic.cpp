@@ -214,6 +214,30 @@ static uint8_t directionVotes(int8_t direction) {
   return votes;
 }
 
+static const char *confirmGroundCandidate(int8_t direction, unsigned long now) {
+  confirmedAtMs = now;
+  if (++confirmedGroundEventSequence == 0) {
+    ++confirmedGroundEventSequence;
+  }
+  rebaseFrames = 0;
+  if (direction < 0) {
+    groundState = GROUND_STEP_UP;
+    confirmedGroundRiskType = "ground_step";
+    downRiskReason = "compensated_ground_rise_confirmed";
+    return "ground_step";
+  }
+  if (lastHeightDeltaCm >= SMARTCANE_DEEP_DROP_CM) {
+    groundState = GROUND_DROP;
+    confirmedGroundRiskType = "ground_drop";
+    downRiskReason = "compensated_deep_drop_confirmed";
+    return "ground_drop";
+  }
+  groundState = GROUND_STEP_DOWN;
+  confirmedGroundRiskType = "ground_step";
+  downRiskReason = "compensated_ground_drop_confirmed";
+  return "ground_step";
+}
+
 static void attachGroundTelemetry(RiskState &risk) {
   risk.compensatedDownCm = lastCompensatedDownCm;
   risk.groundBaselineCm = baselineReady ? baselineDownCm : -1.0f;
@@ -352,10 +376,12 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
 
   // A raised/swept cane can change the down range in exactly the same
   // direction as a lower floor.  Motion is not confirmation, but it is also
-  // not evidence that the edge disappeared: remember a candidate and require
-  // it to persist once the cane returns to its normal-use pose.  Clearing it
-  // here used to make every real walking stair disappear before the two-frame
-  // confirmation could run.
+  // not evidence that the edge disappeared: remember the directional samples
+  // and require them to persist when the cane is back inside its normal-use
+  // pose envelope.  Previously this branch retained only the direction and
+  // threw away every moving sample, so a real stair encountered during a
+  // normal sweep had to become completely still and then collect two *new*
+  // samples before it could alert.  That was the source of missed stairs.
   if (!poseNearNormal || caneMotion) {
     normalUseStableSinceMs = 0;
     if (direction != 0) {
@@ -364,13 +390,30 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
         candidateDirection = direction;
         candidateStartedMs = now;
       }
+      // These samples cannot alert by themselves.  They only preserve the
+      // physical edge through the sweep; confirmation below still requires
+      // the normal-use pose envelope.
+      rememberDirection(direction);
       groundState = direction < 0 ? GROUND_CANDIDATE_UP : GROUND_CANDIDATE_DOWN;
+      // `caneMotion` has a tighter 10-degree posture threshold than
+      // `poseNearNormal` (18 degrees).  A normal walking sweep can therefore
+      // be moving while already inside the safe confirmation envelope.  Let
+      // the already-confirmed two-frame edge alert here instead of returning
+      // early and waiting for an unrelated third still frame.
+      if (poseNearNormal && directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES) {
+        return confirmGroundCandidate(direction, now);
+      }
       downRiskReason = "step_candidate_waiting_normal_use";
       return "none";
     }
     if (candidateDirection != 0) {
-      groundState = candidateDirection < 0 ? GROUND_CANDIDATE_UP : GROUND_CANDIDATE_DOWN;
-      downRiskReason = "step_candidate_waiting_normal_use";
+      // Breaking the enter threshold means the directional edge did not
+      // persist. Clear at once (not only at the tighter 5 cm baseline band),
+      // otherwise a small lift can leave an old candidate behind until some
+      // unrelated later movement happens to share its direction.
+      clearCandidate();
+      groundState = GROUND_NORMAL;
+      downRiskReason = "cane_motion_candidate_cleared_below_threshold";
       return "none";
     }
     groundState = GROUND_NORMAL;
@@ -402,31 +445,13 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
     }
     rememberDirection(direction);
     groundState = direction < 0 ? GROUND_CANDIDATE_UP : GROUND_CANDIDATE_DOWN;
-    // During a sweep/lift, preserve the candidate but do not confirm it.  Once
-    // the cane returns near normal use, two of the latest three raw samples
-    // are sufficient, so a real edge confirms in roughly 200 ms.
-    if (poseNearNormal && !caneMotion && directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES) {
-      confirmedAtMs = now;
-      if (++confirmedGroundEventSequence == 0) {
-        ++confirmedGroundEventSequence;
-      }
-      rebaseFrames = 0;
-      if (direction < 0) {
-        groundState = GROUND_STEP_UP;
-        confirmedGroundRiskType = "ground_step";
-        downRiskReason = "compensated_ground_rise_confirmed";
-        return "ground_step";
-      }
-      if (lastHeightDeltaCm >= SMARTCANE_DEEP_DROP_CM) {
-        groundState = GROUND_DROP;
-        confirmedGroundRiskType = "ground_drop";
-        downRiskReason = "compensated_deep_drop_confirmed";
-        return "ground_drop";
-      }
-      groundState = GROUND_STEP_DOWN;
-      confirmedGroundRiskType = "ground_step";
-      downRiskReason = "compensated_ground_drop_confirmed";
-      return "ground_step";
+    // The moving samples above are only a candidate.  Once the enclosure is
+    // back in the broad normal-use pose envelope, two of the latest three
+    // same-direction readings are enough.  Do not additionally require the
+    // tighter "no motion" flag here: its 10-degree sweep threshold was
+    // preventing a real walking stair from ever reaching confirmation.
+    if (poseNearNormal && directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES) {
+      return confirmGroundCandidate(direction, now);
     }
     downRiskReason = caneMotion ? "step_candidate_waiting_normal_use" : "step_candidate_waiting_second_sample";
     return "none";

@@ -117,6 +117,13 @@ static int downCmForUpload(const char* riskType, const DistanceReadings& distanc
 }
 
 static uint16_t timeoutForPostPath(const char* path) {
+    // Local safety cues are already dispatched before this upload.  Never let
+    // a congested phone hotspot turn the following ToF/IMU frame into a
+    // multi-second wait; the server receives the event whenever it answers in
+    // the normal local-LAN window.
+    if (strncmp(path, "/api/risk-events", strlen("/api/risk-events")) == 0) {
+        return SMARTCANE_EVENT_HTTP_TIMEOUT_MS;
+    }
     if (strncmp(path, "/api/sensor-frames", strlen("/api/sensor-frames")) == 0) {
         return SMARTCANE_SENSOR_FRAME_HTTP_TIMEOUT_MS;
     }

@@ -55,7 +55,10 @@ static bool normalUseReady = false;
 static unsigned long normalUseSinceMs = 0;
 static unsigned long lastNormalUseQualifiedMs = 0;
 static float previousAngleFromBaseline = 0.0f;
-static float previousTotalG = 1.0f;
+// Projection onto the learned gravity direction.  This is the only
+// acceleration channel allowed to start an impact candidate: sideways hand
+// shaking raises total-G but must not enter fall protection.
+static float previousVerticalAccelG = 1.0f;
 static unsigned long previousMotionMs = 0;
 
 static bool readAccel();
@@ -416,11 +419,16 @@ static bool readAccel() {
   state.tiltRateDps = sampleSeconds > 0.005f
       ? fabsf(angleFromBaseline - previousAngleFromBaseline) / sampleSeconds
       : 0.0f;
-  float jerkGPerSec = sampleSeconds > 0.005f
-      ? fabsf(state.totalG - previousTotalG) / sampleSeconds
+  // `dot / baseMag` is acceleration along the learned normal-use gravity
+  // vector.  It is about +1 g while the cane is held normally, approaches
+  // zero during a vertical free-fall movement, and rises on a vertical
+  // landing.  Lateral shaking is largely orthogonal and does not satisfy it.
+  float verticalAccelG = baseMag > 0.01f ? dot / baseMag : state.totalG;
+  float verticalJerkGPerSec = sampleSeconds > 0.005f
+      ? fabsf(verticalAccelG - previousVerticalAccelG) / sampleSeconds
       : 0.0f;
   previousAngleFromBaseline = angleFromBaseline;
-  previousTotalG = state.totalG;
+  previousVerticalAccelG = verticalAccelG;
   previousMotionMs = now;
 
   bool baselineStill = state.gyroDps <= SMARTCANE_FALL_BASELINE_STILL_GYRO_DPS &&
@@ -454,11 +462,14 @@ static bool readAccel() {
     }
   }
 
-  bool accelTrigger = state.totalG > SMARTCANE_FALL_ACCEL_HIGH_G ||
-                       state.totalG < SMARTCANE_FALL_ACCEL_LOW_G;
+  // Candidate acceleration is deliberately vertical-only.  Keep the
+  // existing high/low thresholds, but apply them to the learned up/down
+  // component instead of the all-direction total magnitude.
+  bool verticalAccelTrigger = verticalAccelG > SMARTCANE_FALL_ACCEL_HIGH_G ||
+                             verticalAccelG < SMARTCANE_FALL_ACCEL_LOW_G;
   bool gyroTrigger = state.gyroDps > SMARTCANE_FALL_GYRO_TRIGGER_DPS;
   bool tiltRateTrigger = state.tiltRateDps > SMARTCANE_FALL_FAST_TILT_RATE_DPS;
-  bool jerkTrigger = jerkGPerSec > 2.2f;
+  bool verticalJerkTrigger = verticalJerkGPerSec > 2.2f;
   // A fast large relative tilt is sufficient to start a fall candidate; an
   // impact is useful evidence but is deliberately not mandatory. This covers
   // the common soft-cushion/controlled fall where acceleration is damped.
@@ -473,14 +484,14 @@ static bool readAccel() {
       (state.tiltRateDps >= 18.0f || state.gyroDps >= 18.0f);
   // If the impact and tilt arrive in separate BMI270 samples, retain the
   // impact-assisted path at a smaller angle. It remains only a fallback.
-  bool impactAssistedTiltStart = (accelTrigger || jerkTrigger) &&
+  bool impactAssistedTiltStart = (verticalAccelTrigger || verticalJerkTrigger) &&
       angleFromBaseline >= SMARTCANE_FALL_CANDIDATE_ANGLE_DEG;
   // A real fall often records the acceleration excursion before the enclosure
   // has completed its large angle change.  Once normal cane use was recently
   // qualified, that excursion is enough to enter the *silent* candidate lock.
   // It still cannot emit a fall alert: the independent 58/40-degree, still,
   // two-second confirmation below remains mandatory.
-  bool impactCandidateStart = accelTrigger || jerkTrigger;
+  bool impactCandidateStart = verticalAccelTrigger || verticalJerkTrigger;
   bool abnormalMotionStart = rapidTiltStart || directLyingTransitionStart ||
       impactAssistedTiltStart || impactCandidateStart;
   // The cane is intentionally held at an angle, and BMI270 axes vary with the
@@ -531,11 +542,11 @@ static bool readAccel() {
         bool normalUseArmed = normalUseReady && lastNormalUseQualifiedMs != 0 &&
             now - lastNormalUseQualifiedMs <= SMARTCANE_FALL_NORMAL_USE_LAUNCH_WINDOW_MS;
         if (normalUseArmed && abnormalMotionStart) {
-          beginFallCandidate(now, angleFromBaseline, jerkGPerSec, accelTrigger,
+          beginFallCandidate(now, angleFromBaseline, verticalJerkGPerSec, verticalAccelTrigger,
                              rapidTiltStart ? "normal_use_rapid_tilt_lock_waiting_lying"
                                             : directLyingTransitionStart ? "normal_use_direct_lying_tilt_lock_waiting_lying"
                                             : impactAssistedTiltStart ? "normal_use_impact_assisted_tilt_lock_waiting_lying"
-                                            : "normal_use_accel_lock_waiting_lying");
+                                            : "normal_use_vertical_accel_lock_waiting_lying");
           // The trigger sample in the user's real fall already crossed 58°.
           // Do not wait for one more 50 ms sample to notice it: that sample
           // can be a settling/rebound frame and used to release the lock back
@@ -621,7 +632,7 @@ static bool readAccel() {
           state.eventPending = true;
           state.stage = "fall_confirmed";
           state.reason = "confirmed_fast_tilt_then_still_lying";
-          state.confidence = accelTrigger ? 0.92f : 0.88f;
+          state.confidence = verticalAccelTrigger ? 0.92f : 0.88f;
           lastFallEventMs = now;
           recoverySinceMs = 0;
           stillLyingSinceMs = 0;
