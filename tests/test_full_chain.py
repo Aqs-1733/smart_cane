@@ -143,11 +143,12 @@ def test_firmware_ordinary_cues_are_one_shot_and_network_bounded():
     assert "if (strncmp(path, \"/api/risk-events\"" in network
     assert "SMARTCANE_EVENT_HTTP_TIMEOUT_MS" in network
     assert "SMARTCANE_RISK_PERSISTENT_REPEAT_MS" not in gate
-    assert "now - lastFeedbackMs < SMARTCANE_FEEDBACK_REPEAT_MS" in gate
+    assert "isSameObstacleType(risk, activeFeedbackRisk)" in gate
+    assert "risk.level <= activeFeedbackRisk.level" in gate
     assert "beepPatternDanger();" not in sketch[sketch.index("static void runCue"):sketch.index("static FeedbackCue cueForRisk")]
-    assert "applyFeedbackForRisk(currentRisk, false, true);" in sketch
+    assert "applyFeedbackForRisk(currentRisk, true, true);" in sketch
     assert "if (buzzerAlertActive())" in sketch
-    assert "serviceLocalCueUpload(now);" in sketch
+    assert "serviceLocalCueUpload(millis());" in sketch
 
 
 def test_fall_lock_suppresses_distance_feedback_without_time_cooldown(tmp_path, monkeypatch):

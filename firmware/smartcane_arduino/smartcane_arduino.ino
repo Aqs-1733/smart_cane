@@ -336,6 +336,13 @@ static bool sameFeedbackEvent(const RiskState &a, const RiskState &b) {
   return sameRiskFingerprint(a, b);
 }
 
+static bool isSameObstacleType(const RiskState &a, const RiskState &b) {
+  return sameText(a.riskType, b.riskType) &&
+      (strcmp(a.riskType, "front_obstacle") == 0 ||
+       strcmp(a.riskType, "left_obstacle") == 0 ||
+       strcmp(a.riskType, "right_obstacle") == 0);
+}
+
 static bool fallLockActive() {
   return imuFallCurrent().fallLock;
 }
@@ -369,16 +376,17 @@ static bool updateRiskFeedbackGate(const RiskState &risk, bool &persistent) {
   }
 
   riskClearStartedMs = 0;
-  // A noisy boundary can alternate front/left/right classification faster
-  // than the 120 ms tone finishes.  Do not restart that tone: keep the
-  // ordinary cue rate bounded and let the latest stable risk win afterward.
-  if (lastFeedbackMs != 0 &&
-      now - lastFeedbackMs < SMARTCANE_FEEDBACK_REPEAT_MS) {
-    return false;
-  }
   bool isNewObstacle = feedbackArmed ||
                        !haveActiveFeedbackRisk ||
                        !sameFeedbackEvent(risk, activeFeedbackRisk);
+  // Treat direction changes (slow/turn-left/turn-right) and a high-to-low
+  // fluctuation as the same physical obstacle. A low-to-high escalation is
+  // deliberately new and must alert immediately; a different side/front or
+  // stair event is also never hidden by a global time cooldown.
+  if (isSameObstacleType(risk, activeFeedbackRisk) &&
+      risk.level <= activeFeedbackRisk.level) {
+    isNewObstacle = false;
+  }
   if (isNewObstacle) {
     activeFeedbackRisk = risk;
     haveActiveFeedbackRisk = true;
@@ -1609,7 +1617,6 @@ void loop() {
   serviceFallState(now);
   updateGnssLocation();
   networkClientUpdate();
-  serviceLocalCueUpload(now);
 
   if (now - lastSensorMs >= SMARTCANE_SENSOR_INTERVAL_MS) {
     lastSensorMs = now;
@@ -1635,11 +1642,16 @@ void loop() {
       monitorCompanionAlerts(currentRisk);
       bool persistent = false;
       if (updateRiskFeedbackGate(currentRisk, persistent)) {
-        applyFeedbackForRisk(currentRisk, false, true);
+        applyFeedbackForRisk(currentRisk, true, true);
         publishLocalCueEvent(currentRisk, persistent, shouldBuzzForRisk(currentRisk));
       }
     }
   }
+
+  // Run the queued phone upload only after this loop has serviced the newest
+  // ToF/IMU frame. The short local tone starts first; its cue upload follows
+  // as soon as the 120 ms tone ends without delaying that next safety sample.
+  serviceLocalCueUpload(millis());
 
 #if SMARTCANE_PERIODIC_SERIAL_STATUS_ENABLED
   if (now - lastStatusMs >= SMARTCANE_STATUS_INTERVAL_MS) {
