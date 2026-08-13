@@ -58,6 +58,7 @@ static bool haveActiveFeedbackRisk = false;
 static unsigned long riskClearStartedMs = 0;
 static unsigned long riskFeedbackStartedMs = 0;
 static unsigned long lastPersistentFeedbackMs = 0;
+static unsigned long ordinaryCueStartupUntilMs = 0;
 static long lastEventLatCell = 0;
 static long lastEventLngCell = 0;
 static bool haveLastPathCell = false;
@@ -359,6 +360,17 @@ static void rearmOrdinaryFeedbackAfterFallLock() {
 static bool updateRiskFeedbackGate(const RiskState &risk, bool &persistent) {
   unsigned long now = millis();
   persistent = false;
+  // Setup and the first Wi-Fi requests can leave the four ToF channels with
+  // briefly different initial readings.  Do not restart a 120 ms ordinary
+  // tone for those startup transitions.  At expiry clear the cue gate so the
+  // first stable, real risk still receives its normal one-shot cue.
+  if (ordinaryCueStartupUntilMs != 0) {
+    if ((long)(now - ordinaryCueStartupUntilMs) < 0) {
+      return false;
+    }
+    ordinaryCueStartupUntilMs = 0;
+    rearmOrdinaryFeedbackAfterFallLock();
+  }
   if (!hasConcreteRisk(risk)) {
     if (haveActiveFeedbackRisk) {
       if (riskClearStartedMs == 0) {
@@ -1591,6 +1603,7 @@ void setup() {
 
   tofRead(distances);
   currentRisk = stabilizeRisk(calculateRisk(distances, nearby, imuFallCurrent()));
+  ordinaryCueStartupUntilMs = millis() + SMARTCANE_STARTUP_ORDINARY_CUE_GUARD_MS;
   recordPathPointIfMoved(currentRisk);
 #if !SMARTCANE_PRODUCT_MODE
   printHelp();

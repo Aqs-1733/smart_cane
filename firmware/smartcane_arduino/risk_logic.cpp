@@ -374,50 +374,23 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
     return holdRisk;
   }
 
-  // A raised/swept cane can change the down range in exactly the same
-  // direction as a lower floor.  Motion is not confirmation, but it is also
-  // not evidence that the edge disappeared: remember the directional samples
-  // and require them to persist when the cane is back inside its normal-use
-  // pose envelope.  Previously this branch retained only the direction and
-  // threw away every moving sample, so a real stair encountered during a
-  // normal sweep had to become completely still and then collect two *new*
-  // samples before it could alert.  That was the source of missed stairs.
+  // A raised/swept cane changes the down range in exactly the same direction
+  // as a lower floor.  Never carry raw samples from that movement into later
+  // confirmation: a 10 cm hand lift must not become a stair/drop after the
+  // cane stops.  A real edge is still detected after normal use settles for
+  // 250 ms and provides two new same-direction readings.  Keep only the
+  // transient ground state while the range is beyond an edge threshold, so
+  // the front beam looking at the floor is not misreported as an obstacle.
   if (!poseNearNormal || caneMotion) {
+    clearCandidate();
     normalUseStableSinceMs = 0;
     if (direction != 0) {
-      if (candidateDirection != direction) {
-        clearCandidate();
-        candidateDirection = direction;
-        candidateStartedMs = now;
-      }
-      // These samples cannot alert by themselves.  They only preserve the
-      // physical edge through the sweep; confirmation below still requires
-      // the normal-use pose envelope.
-      rememberDirection(direction);
       groundState = direction < 0 ? GROUND_CANDIDATE_UP : GROUND_CANDIDATE_DOWN;
-      // `caneMotion` has a tighter 10-degree posture threshold than
-      // `poseNearNormal` (18 degrees).  A normal walking sweep can therefore
-      // be moving while already inside the safe confirmation envelope.  Let
-      // the already-confirmed two-frame edge alert here instead of returning
-      // early and waiting for an unrelated third still frame.
-      if (poseNearNormal && directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES) {
-        return confirmGroundCandidate(direction, now);
-      }
-      downRiskReason = "step_candidate_waiting_normal_use";
-      return "none";
-    }
-    if (candidateDirection != 0) {
-      // Breaking the enter threshold means the directional edge did not
-      // persist. Clear at once (not only at the tighter 5 cm baseline band),
-      // otherwise a small lift can leave an old candidate behind until some
-      // unrelated later movement happens to share its direction.
-      clearCandidate();
+      downRiskReason = "cane_motion_ground_suppressed";
+    } else {
       groundState = GROUND_NORMAL;
-      downRiskReason = "cane_motion_candidate_cleared_below_threshold";
-      return "none";
+      downRiskReason = "cane_motion_candidate_cancelled";
     }
-    groundState = GROUND_NORMAL;
-    downRiskReason = "cane_motion_no_ground_candidate";
     return "none";
   }
   if (normalUseStableSinceMs == 0) {
@@ -425,13 +398,7 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
   }
 
   if (direction != 0) {
-    // A candidate observed while moving has already waited for the motion to
-    // settle.  Count its first normal-use sample immediately; a new candidate
-    // still receives the existing short settle interval.
-    const bool candidateFromMotion = candidateDirection == direction &&
-        candidateStartedMs != 0;
-    if (!candidateFromMotion &&
-        now - normalUseStableSinceMs < SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS) {
+    if (now - normalUseStableSinceMs < SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS) {
       // Suppress the front ToF's view of the stair riser while the ground
       // detector takes its short, independent confirmation window.
       groundState = direction < 0 ? GROUND_CANDIDATE_UP : GROUND_CANDIDATE_DOWN;
@@ -445,15 +412,11 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
     }
     rememberDirection(direction);
     groundState = direction < 0 ? GROUND_CANDIDATE_UP : GROUND_CANDIDATE_DOWN;
-    // The moving samples above are only a candidate.  Once the enclosure is
-    // back in the broad normal-use pose envelope, two of the latest three
-    // same-direction readings are enough.  Do not additionally require the
-    // tighter "no motion" flag here: its 10-degree sweep threshold was
-    // preventing a real walking stair from ever reaching confirmation.
-    if (poseNearNormal && directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES) {
+    if (poseNearNormal && !caneMotion &&
+        directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES) {
       return confirmGroundCandidate(direction, now);
     }
-    downRiskReason = caneMotion ? "step_candidate_waiting_normal_use" : "step_candidate_waiting_second_sample";
+    downRiskReason = "step_candidate_waiting_second_sample";
     return "none";
   }
 

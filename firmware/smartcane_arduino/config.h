@@ -7,7 +7,7 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-cue-responsive-short-20260813"
+#define SMARTCANE_BUILD_TAG "arduino-fall-step-startup-guard-20260813"
 #define SMARTCANE_DEVICE_ID "cane_001"
 #ifndef SMARTCANE_DEVICE_NAME
 #define SMARTCANE_DEVICE_NAME "智能盲杖01"
@@ -124,6 +124,9 @@
 #define SMARTCANE_PERIODIC_SERIAL_STATUS_ENABLED 0
 #define SMARTCANE_FEEDBACK_REPEAT_MS 800
 #define SMARTCANE_RISK_FEEDBACK_REARM_CLEAR_MS 3000
+// Give real ToF readings a short time to settle after setup/Wi-Fi work.  This
+// only mutes ordinary distance/ground cues; a formal fall alert is unaffected.
+#define SMARTCANE_STARTUP_ORDINARY_CUE_GUARD_MS 2500
 #define SMARTCANE_RISK_PERSISTENT_FEEDBACK_MS 3000
 #define SMARTCANE_RISK_PERSISTENT_REPEAT_MS 1200
 #define SMARTCANE_TELEMETRY_LOW_RISK_INTERVAL_MS 30000
@@ -233,8 +236,12 @@
 #define SMARTCANE_IMU_SAMPLE_INTERVAL_MS 50
 #define SMARTCANE_IMU_STREAM_INTERVAL_MS 500
 #define SMARTCANE_IMU_RAW_PRINT_REGS 0
-#define SMARTCANE_FALL_ACCEL_HIGH_G 1.22f
-#define SMARTCANE_FALL_ACCEL_LOW_G 0.85f
+// Candidate-lock thresholds apply only to acceleration along the learned
+// normal-use gravity vector.  Keep a real vertical fall responsive, while a
+// light hand wave no longer starts a silent fall candidate.
+#define SMARTCANE_FALL_ACCEL_HIGH_G 1.32f
+#define SMARTCANE_FALL_ACCEL_LOW_G 0.75f
+#define SMARTCANE_FALL_VERTICAL_JERK_TRIGGER_G_PER_S 3.0f
 #define SMARTCANE_FALL_GYRO_TRIGGER_DPS 35.0f
 #define SMARTCANE_FALL_FAST_ANGLE_DEG 45.0f
 #define SMARTCANE_FALL_CANDIDATE_ANGLE_DEG 30.0f

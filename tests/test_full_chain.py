@@ -117,14 +117,14 @@ def test_firmware_sweep_filter_keeps_stairs_distinct_from_front_risers():
     assert "SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS 250" in config
     assert "SMARTCANE_DOWN_STARTUP_RELEARN_MS 1500" in config
     assert "if (!poseNearNormal || caneMotion)" in ground
-    assert "step_candidate_waiting_normal_use" in ground
-    assert "cane_motion_no_ground_candidate" in ground
-    assert "const bool candidateFromMotion" in ground
+    assert "cane_motion_candidate_cancelled" in ground
+    assert "cane_motion_ground_suppressed" in ground
+    assert "clearCandidate();" in ground
+    assert "const bool candidateFromMotion" not in ground
     assert "static const char *confirmGroundCandidate" in ground
     assert "rememberDirection(direction);" in ground
-    assert "if (poseNearNormal && directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES)" in ground
-    assert "!caneMotion && directionVotes(direction)" not in ground
-    assert "cane_motion_candidate_cleared_below_threshold" in ground
+    assert "if (poseNearNormal && !caneMotion &&" in ground
+    assert "directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES" in ground
     assert "startup_normal_use_settling" in ground
     assert "down_transient_read_ignored" in ground
     assert "step_candidate_waiting_stable_normal_use" in ground
@@ -140,6 +140,7 @@ def test_firmware_ordinary_cues_are_one_shot_and_network_bounded():
     assert "SMARTCANE_EVENT_HTTP_TIMEOUT_MS 120" in config
     assert "SMARTCANE_SENSOR_FRAME_HTTP_TIMEOUT_MS 120" in config
     assert "SMARTCANE_BACKGROUND_HTTP_TIMEOUT_MS 120" in config
+    assert "SMARTCANE_STARTUP_ORDINARY_CUE_GUARD_MS 2500" in config
     assert "if (strncmp(path, \"/api/risk-events\"" in network
     assert "SMARTCANE_EVENT_HTTP_TIMEOUT_MS" in network
     assert "SMARTCANE_RISK_PERSISTENT_REPEAT_MS" not in gate
@@ -149,6 +150,8 @@ def test_firmware_ordinary_cues_are_one_shot_and_network_bounded():
     assert "applyFeedbackForRisk(currentRisk, true, true);" in sketch
     assert "if (buzzerAlertActive())" in sketch
     assert "serviceLocalCueUpload(millis());" in sketch
+    assert "ordinaryCueStartupUntilMs" in gate
+    assert "rearmOrdinaryFeedbackAfterFallLock();" in gate
 
 
 def test_fall_lock_suppresses_distance_feedback_without_time_cooldown(tmp_path, monkeypatch):
@@ -603,6 +606,10 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "bool rapidTiltStart = angleFromBaseline >= SMARTCANE_FALL_FAST_ANGLE_DEG" in imu
     assert "float verticalAccelG = baseMag > 0.01f ? dot / baseMag : state.totalG;" in imu
     assert "bool verticalAccelTrigger = verticalAccelG > SMARTCANE_FALL_ACCEL_HIGH_G" in imu
+    assert "SMARTCANE_FALL_ACCEL_HIGH_G 1.32f" in config
+    assert "SMARTCANE_FALL_ACCEL_LOW_G 0.75f" in config
+    assert "SMARTCANE_FALL_VERTICAL_JERK_TRIGGER_G_PER_S 3.0f" in config
+    assert "verticalJerkGPerSec > SMARTCANE_FALL_VERTICAL_JERK_TRIGGER_G_PER_S" in imu
     assert "bool impactAssistedTiltStart = (verticalAccelTrigger || verticalJerkTrigger)" in imu
     assert "bool impactCandidateStart = verticalAccelTrigger || verticalJerkTrigger;" in imu
     assert "normal_use_vertical_accel_lock_waiting_lying" in imu
