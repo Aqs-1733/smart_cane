@@ -117,7 +117,9 @@ def test_firmware_sweep_filter_keeps_stairs_distinct_from_front_risers():
     assert "SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS 250" in config
     assert "SMARTCANE_DOWN_STARTUP_RELEARN_MS 1500" in config
     assert "if (!poseNearNormal || caneMotion)" in ground
-    assert "cane_motion_candidate_cancelled" in ground
+    assert "step_candidate_waiting_normal_use" in ground
+    assert "cane_motion_no_ground_candidate" in ground
+    assert "const bool candidateFromMotion" in ground
     assert "startup_normal_use_settling" in ground
     assert "down_transient_read_ignored" in ground
     assert "step_candidate_waiting_stable_normal_use" in ground
@@ -576,6 +578,8 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "bool normalUseArmed = normalUseReady" in imu
     assert "bool rapidTiltStart = angleFromBaseline >= SMARTCANE_FALL_FAST_ANGLE_DEG" in imu
     assert "bool impactAssistedTiltStart = (accelTrigger || jerkTrigger)" in imu
+    assert "bool impactCandidateStart = accelTrigger || jerkTrigger;" in imu
+    assert "normal_use_accel_lock_waiting_lying" in imu
     assert "bool directLyingTransitionStart = angleFromBaseline >= SMARTCANE_FALL_LYING_ANGLE_DEG" in imu
     assert "normal_use_rapid_tilt_lock_waiting_lying" in imu
     assert "normal_use_direct_lying_tilt_lock_waiting_lying" in imu

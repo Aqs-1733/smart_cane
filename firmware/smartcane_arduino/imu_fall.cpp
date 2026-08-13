@@ -475,7 +475,14 @@ static bool readAccel() {
   // impact-assisted path at a smaller angle. It remains only a fallback.
   bool impactAssistedTiltStart = (accelTrigger || jerkTrigger) &&
       angleFromBaseline >= SMARTCANE_FALL_CANDIDATE_ANGLE_DEG;
-  bool abnormalMotionStart = rapidTiltStart || directLyingTransitionStart || impactAssistedTiltStart;
+  // A real fall often records the acceleration excursion before the enclosure
+  // has completed its large angle change.  Once normal cane use was recently
+  // qualified, that excursion is enough to enter the *silent* candidate lock.
+  // It still cannot emit a fall alert: the independent 58/40-degree, still,
+  // two-second confirmation below remains mandatory.
+  bool impactCandidateStart = accelTrigger || jerkTrigger;
+  bool abnormalMotionStart = rapidTiltStart || directLyingTransitionStart ||
+      impactAssistedTiltStart || impactCandidateStart;
   // The cane is intentionally held at an angle, and BMI270 axes vary with the
   // enclosure. Only a change from the learned normal-use vector represents
   // lying down; absolute pitch/roll must never be used as the lying test.
@@ -527,7 +534,8 @@ static bool readAccel() {
           beginFallCandidate(now, angleFromBaseline, jerkGPerSec, accelTrigger,
                              rapidTiltStart ? "normal_use_rapid_tilt_lock_waiting_lying"
                                             : directLyingTransitionStart ? "normal_use_direct_lying_tilt_lock_waiting_lying"
-                                            : "normal_use_impact_assisted_tilt_lock_waiting_lying");
+                                            : impactAssistedTiltStart ? "normal_use_impact_assisted_tilt_lock_waiting_lying"
+                                            : "normal_use_accel_lock_waiting_lying");
           // The trigger sample in the user's real fall already crossed 58°.
           // Do not wait for one more 50 ms sample to notice it: that sample
           // can be a settling/rebound frame and used to release the lock back

@@ -350,15 +350,31 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
     return holdRisk;
   }
 
-  // A raised/swept cane changes the down range in exactly the same direction
-  // as a lower floor. Do not carry raw samples from that motion into the later
-  // normal-use confirmation; re-arm only after a short stable hold. The real
-  // stair thresholds and two-of-three confirmation remain unchanged.
+  // A raised/swept cane can change the down range in exactly the same
+  // direction as a lower floor.  Motion is not confirmation, but it is also
+  // not evidence that the edge disappeared: remember a candidate and require
+  // it to persist once the cane returns to its normal-use pose.  Clearing it
+  // here used to make every real walking stair disappear before the two-frame
+  // confirmation could run.
   if (!poseNearNormal || caneMotion) {
-    clearCandidate();
-    groundState = GROUND_NORMAL;
     normalUseStableSinceMs = 0;
-    downRiskReason = "cane_motion_candidate_cancelled";
+    if (direction != 0) {
+      if (candidateDirection != direction) {
+        clearCandidate();
+        candidateDirection = direction;
+        candidateStartedMs = now;
+      }
+      groundState = direction < 0 ? GROUND_CANDIDATE_UP : GROUND_CANDIDATE_DOWN;
+      downRiskReason = "step_candidate_waiting_normal_use";
+      return "none";
+    }
+    if (candidateDirection != 0) {
+      groundState = candidateDirection < 0 ? GROUND_CANDIDATE_UP : GROUND_CANDIDATE_DOWN;
+      downRiskReason = "step_candidate_waiting_normal_use";
+      return "none";
+    }
+    groundState = GROUND_NORMAL;
+    downRiskReason = "cane_motion_no_ground_candidate";
     return "none";
   }
   if (normalUseStableSinceMs == 0) {
@@ -366,7 +382,13 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
   }
 
   if (direction != 0) {
-    if (now - normalUseStableSinceMs < SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS) {
+    // A candidate observed while moving has already waited for the motion to
+    // settle.  Count its first normal-use sample immediately; a new candidate
+    // still receives the existing short settle interval.
+    const bool candidateFromMotion = candidateDirection == direction &&
+        candidateStartedMs != 0;
+    if (!candidateFromMotion &&
+        now - normalUseStableSinceMs < SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS) {
       // Suppress the front ToF's view of the stair riser while the ground
       // detector takes its short, independent confirmation window.
       groundState = direction < 0 ? GROUND_CANDIDATE_UP : GROUND_CANDIDATE_DOWN;
