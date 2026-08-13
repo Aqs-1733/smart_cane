@@ -115,19 +115,15 @@ def test_firmware_sweep_filter_keeps_stairs_distinct_from_front_risers():
     ground = (ROOT / "firmware" / "smartcane_arduino" / "risk_logic.cpp").read_text(encoding="utf-8")
     assert "SMARTCANE_FRONT_WARN_CM 120" in config
     assert "SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS 250" in config
-    assert "SMARTCANE_DOWN_PROBE_POSE_DELTA_DEG 5.0f" in config
     assert "SMARTCANE_DOWN_STARTUP_RELEARN_MS 1500" in config
-    assert "static bool imuAtGroundProbePose" in ground
-    assert "const bool groundProbePose = imuAtGroundProbePose(imu);" in ground
-    assert "if (!groundProbePose || caneMotion)" in ground
+    assert "if (!poseNearNormal || caneMotion)" in ground
     assert "cane_motion_candidate_cancelled" in ground
     assert "cane_motion_ground_suppressed" in ground
-    assert "ground_probe_pose_required" in ground
     assert "clearCandidate();" in ground
     assert "const bool candidateFromMotion" not in ground
     assert "static const char *confirmGroundCandidate" in ground
     assert "rememberDirection(direction);" in ground
-    assert "if (groundProbePose && !caneMotion &&" in ground
+    assert "if (poseNearNormal && !caneMotion &&" in ground
     assert "directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES" in ground
     assert "startup_normal_use_settling" in ground
     assert "down_transient_read_ignored" in ground

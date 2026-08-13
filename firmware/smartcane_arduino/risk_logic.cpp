@@ -179,14 +179,6 @@ static bool imuAtNormalUsePose(const ImuFallState &imu) {
        imu.gyroDps <= SMARTCANE_DOWN_MOTION_GYRO_DPS);
 }
 
-static bool imuAtGroundProbePose(const ImuFallState &imu) {
-  return !imu.available ||
-      (fabsf(imu.pitchDeg - normalUsePitchDeg) <= SMARTCANE_DOWN_PROBE_POSE_DELTA_DEG &&
-       fabsf(wrappedAngleDeltaDeg(imu.rollDeg, normalUseRollDeg)) <= SMARTCANE_DOWN_PROBE_POSE_DELTA_DEG &&
-       fabsf(imu.totalG - 1.0f) <= SMARTCANE_DOWN_NORMAL_G_DELTA &&
-       imu.gyroDps <= SMARTCANE_DOWN_MOTION_GYRO_DPS);
-}
-
 static bool caneInMotion(const ImuFallState &imu) {
   if (!imu.available) return false;
   return imu.gyroDps > SMARTCANE_DOWN_MOTION_GYRO_DPS ||
@@ -324,9 +316,8 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
 
   lastHeightDeltaCm = compensatedCm - baselineDownCm;
   const bool poseNearNormal = imuAtNormalUsePose(imu);
-  const bool groundProbePose = imuAtGroundProbePose(imu);
   const bool caneMotion = caneInMotion(imu);
-  lastCaneMotion = caneMotion || !groundProbePose;
+  lastCaneMotion = caneMotion;
 
   if ((long)(now - startupRelearnUntilMs) < 0) {
     clearCandidate();
@@ -384,22 +375,21 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
   }
 
   // A raised/swept cane changes the down range in exactly the same direction
-  // as a lower floor.  Even after it stops, a changed inclination is not the
-  // learned probing angle.  Never carry samples from either state into later
-  // confirmation: a flat-ground touch/raise must not become a stair/drop.
-  // While gated, retain only a transient ground state so a front beam looking
-  // at the floor is not misreported as an obstacle.
-  if (!groundProbePose || caneMotion) {
+  // as a lower floor.  Never carry raw samples from that movement into later
+  // confirmation: a 10 cm hand lift must not become a stair/drop after the
+  // cane stops.  A real edge is still detected after normal use settles for
+  // 250 ms and provides two new same-direction readings.  Keep only the
+  // transient ground state while the range is beyond an edge threshold, so
+  // the front beam looking at the floor is not misreported as an obstacle.
+  if (!poseNearNormal || caneMotion) {
     clearCandidate();
     normalUseStableSinceMs = 0;
     if (direction != 0) {
       groundState = direction < 0 ? GROUND_CANDIDATE_UP : GROUND_CANDIDATE_DOWN;
-      downRiskReason = caneMotion ? "cane_motion_ground_suppressed"
-                                  : "ground_probe_pose_required";
+      downRiskReason = "cane_motion_ground_suppressed";
     } else {
       groundState = GROUND_NORMAL;
-      downRiskReason = caneMotion ? "cane_motion_candidate_cancelled"
-                                  : "ground_probe_pose_required";
+      downRiskReason = "cane_motion_candidate_cancelled";
     }
     return "none";
   }
@@ -422,7 +412,7 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
     }
     rememberDirection(direction);
     groundState = direction < 0 ? GROUND_CANDIDATE_UP : GROUND_CANDIDATE_DOWN;
-    if (groundProbePose && !caneMotion &&
+    if (poseNearNormal && !caneMotion &&
         directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES) {
       return confirmGroundCandidate(direction, now);
     }
@@ -435,7 +425,7 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
   if (fabsf(lastHeightDeltaCm) <= SMARTCANE_STEP_CLEAR_CM) {
     clearCandidate();
     groundState = GROUND_NORMAL;
-    if (groundProbePose && !caneMotion) {
+    if (poseNearNormal && !caneMotion) {
       baselineDownCm = baselineDownCm * 0.985f + compensatedCm * 0.015f;
       normalUsePitchDeg = normalUsePitchDeg * 0.985f + imu.pitchDeg * 0.015f;
       normalUseRollDeg = blendWrappedAngleDeg(normalUseRollDeg, imu.rollDeg, 0.015f);
