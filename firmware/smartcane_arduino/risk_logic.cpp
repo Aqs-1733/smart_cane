@@ -94,6 +94,10 @@ static unsigned long candidateStartedMs = 0;
 static unsigned long confirmedAtMs = 0;
 static unsigned long normalUseStableSinceMs = 0;
 static unsigned long startupRelearnUntilMs = 0;
+static bool ambiguousDropSweepPending = false;
+static bool ambiguousDropSweepReturned = false;
+static unsigned long ambiguousDropSweepStartedMs = 0;
+static float ambiguousDropSweepPeakPoseDeltaDeg = 0.0f;
 static float rebaseLastCm = 0.0f;
 static uint8_t rebaseFrames = 0;
 static float lastCompensatedDownCm = -1.0f;
@@ -145,6 +149,10 @@ void resetGroundStepDetector() {
   confirmedAtMs = 0;
   normalUseStableSinceMs = 0;
   startupRelearnUntilMs = 0;
+  ambiguousDropSweepPending = false;
+  ambiguousDropSweepReturned = false;
+  ambiguousDropSweepStartedMs = 0;
+  ambiguousDropSweepPeakPoseDeltaDeg = 0.0f;
   rebaseLastCm = 0.0f;
   rebaseFrames = 0;
   lastCompensatedDownCm = -1.0f;
@@ -179,6 +187,13 @@ static bool imuAtNormalUsePose(const ImuFallState &imu) {
        imu.gyroDps <= SMARTCANE_DOWN_MOTION_GYRO_DPS);
 }
 
+static float normalUsePoseDeviationDeg(const ImuFallState &imu) {
+  if (!imu.available) return 0.0f;
+  const float pitchDelta = fabsf(imu.pitchDeg - normalUsePitchDeg);
+  const float rollDelta = fabsf(wrappedAngleDeltaDeg(imu.rollDeg, normalUseRollDeg));
+  return fmaxf(pitchDelta, rollDelta);
+}
+
 static bool caneInMotion(const ImuFallState &imu) {
   if (!imu.available) return false;
   return imu.gyroDps > SMARTCANE_DOWN_MOTION_GYRO_DPS ||
@@ -200,6 +215,30 @@ static void clearCandidate() {
   candidateStartedMs = 0;
 }
 
+static void clearAmbiguousDropSweep() {
+  ambiguousDropSweepPending = false;
+  ambiguousDropSweepReturned = false;
+  ambiguousDropSweepStartedMs = 0;
+  ambiguousDropSweepPeakPoseDeltaDeg = 0.0f;
+}
+
+static void observeAmbiguousDropSweep(unsigned long now, float poseDeltaDeg) {
+  if (!ambiguousDropSweepPending) {
+    ambiguousDropSweepPending = true;
+    ambiguousDropSweepReturned = false;
+    ambiguousDropSweepStartedMs = now;
+    ambiguousDropSweepPeakPoseDeltaDeg = poseDeltaDeg;
+    return;
+  }
+  if (poseDeltaDeg > ambiguousDropSweepPeakPoseDeltaDeg) {
+    ambiguousDropSweepPeakPoseDeltaDeg = poseDeltaDeg;
+  }
+  if (poseDeltaDeg <= SMARTCANE_DOWN_SWEEP_RETURN_NEAR_NORMAL_DEG ||
+      ambiguousDropSweepPeakPoseDeltaDeg - poseDeltaDeg >= SMARTCANE_DOWN_SWEEP_RETURN_DELTA_DEG) {
+    ambiguousDropSweepReturned = true;
+  }
+}
+
 static void rememberDirection(int8_t direction) {
   directionHistory[directionHistoryIndex] = direction;
   directionHistoryIndex = (directionHistoryIndex + 1) % SMARTCANE_STEP_HISTORY_SAMPLES;
@@ -215,6 +254,7 @@ static uint8_t directionVotes(int8_t direction) {
 }
 
 static const char *confirmGroundCandidate(int8_t direction, unsigned long now) {
+  clearAmbiguousDropSweep();
   confirmedAtMs = now;
   if (++confirmedGroundEventSequence == 0) {
     ++confirmedGroundEventSequence;
@@ -261,11 +301,13 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
 
   if (d.downNoTarget || rawCm >= SMARTCANE_DOWN_NO_TARGET_CM) {
     clearCandidate();
+    clearAmbiguousDropSweep();
     downRiskReason = "down_no_target_ignored";
     return "none";
   }
   if (!d.downValid) {
     clearCandidate();
+    clearAmbiguousDropSweep();
     // The ToF reader intentionally tolerates a few missed samples.  Do not
     // turn one bus timeout while the cane is moving into a medium, audible
     // hazard; only report a genuinely unavailable down sensor after the same
@@ -316,6 +358,7 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
 
   lastHeightDeltaCm = compensatedCm - baselineDownCm;
   const bool poseNearNormal = imuAtNormalUsePose(imu);
+  const float poseDeviationDeg = normalUsePoseDeviationDeg(imu);
   const bool caneMotion = caneInMotion(imu);
   lastCaneMotion = caneMotion;
 
@@ -384,6 +427,21 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
   if (!poseNearNormal || caneMotion) {
     clearCandidate();
     normalUseStableSinceMs = 0;
+    // Downward range plus a distinctly inclined sweep is ambiguous: it can
+    // be a real drop, or simply the user raising/pointing the cane on flat
+    // ground. Preserve no vote from this motion; later code only asks for a
+    // short return-sweep observation before resuming the unchanged path.
+    if (ambiguousDropSweepPending && direction == 1) {
+      // A natural reverse sweep can occur before the cane is completely
+      // still. Record it now; confirmation still waits for the existing
+      // normal-use posture and fresh samples below.
+      observeAmbiguousDropSweep(now, poseDeviationDeg);
+    } else if (direction > 0 && caneMotion &&
+               poseDeviationDeg >= SMARTCANE_DOWN_SWEEP_AMBIGUOUS_POSE_DEG) {
+      observeAmbiguousDropSweep(now, poseDeviationDeg);
+    } else if (ambiguousDropSweepPending && direction != 1) {
+      clearAmbiguousDropSweep();
+    }
     if (direction != 0) {
       groundState = direction < 0 ? GROUND_CANDIDATE_UP : GROUND_CANDIDATE_DOWN;
       downRiskReason = "cane_motion_ground_suppressed";
@@ -395,6 +453,26 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
   }
   if (normalUseStableSinceMs == 0) {
     normalUseStableSinceMs = now;
+  }
+
+  if (ambiguousDropSweepPending) {
+    if (direction != 1) {
+      // The down range returned before a confirmed edge: this was the flat
+      // ground sweep that the validation is intended to ignore.
+      clearAmbiguousDropSweep();
+    } else {
+      observeAmbiguousDropSweep(now, poseDeviationDeg);
+      if (!ambiguousDropSweepReturned &&
+          now - ambiguousDropSweepStartedMs < SMARTCANE_DOWN_SWEEP_RETURN_WAIT_MS) {
+        groundState = GROUND_CANDIDATE_DOWN;
+        downRiskReason = "ambiguous_drop_waiting_sweep_return";
+        return "none";
+      }
+      // A real downstairs edge remains after the user naturally sweeps back.
+      // If there is no return within the bounded window, do not hold a true
+      // hazard indefinitely; resume the original 250 ms/two-sample path.
+      clearAmbiguousDropSweep();
+    }
   }
 
   if (direction != 0) {

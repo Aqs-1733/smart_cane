@@ -115,6 +115,8 @@ def test_firmware_sweep_filter_keeps_stairs_distinct_from_front_risers():
     ground = (ROOT / "firmware" / "smartcane_arduino" / "risk_logic.cpp").read_text(encoding="utf-8")
     assert "SMARTCANE_FRONT_WARN_CM 120" in config
     assert "SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS 250" in config
+    assert "SMARTCANE_DOWN_SWEEP_AMBIGUOUS_POSE_DEG 8.0f" in config
+    assert "SMARTCANE_DOWN_SWEEP_RETURN_WAIT_MS 600" in config
     assert "SMARTCANE_DOWN_STARTUP_RELEARN_MS 1500" in config
     assert "if (!poseNearNormal || caneMotion)" in ground
     assert "cane_motion_candidate_cancelled" in ground
@@ -125,6 +127,11 @@ def test_firmware_sweep_filter_keeps_stairs_distinct_from_front_risers():
     assert "rememberDirection(direction);" in ground
     assert "if (poseNearNormal && !caneMotion &&" in ground
     assert "directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES" in ground
+    assert "ambiguousDropSweepPending" in ground
+    assert "ambiguous_drop_waiting_sweep_return" in ground
+    assert "observeAmbiguousDropSweep" in ground
+    assert "clearAmbiguousDropSweep" in ground
+    assert "ambiguousDropSweepPending && direction == 1" in ground
     assert "startup_normal_use_settling" in ground
     assert "down_transient_read_ignored" in ground
     assert "step_candidate_waiting_stable_normal_use" in ground
