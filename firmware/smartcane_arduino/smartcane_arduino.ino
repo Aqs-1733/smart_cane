@@ -59,6 +59,9 @@ static bool haveActiveFeedbackRisk = false;
 static unsigned long riskClearStartedMs = 0;
 static unsigned long riskFeedbackStartedMs = 0;
 static unsigned long lastPersistentFeedbackMs = 0;
+static bool haveActiveFeedbackLocation = false;
+static long activeFeedbackLatCell = 0;
+static long activeFeedbackLngCell = 0;
 static long lastEventLatCell = 0;
 static long lastEventLngCell = 0;
 static bool haveLastPathCell = false;
@@ -261,12 +264,6 @@ static bool sameText(const char *a, const char *b) {
   return strcmp(a, b) == 0;
 }
 
-static bool sameRiskFingerprint(const RiskState &a, const RiskState &b) {
-  return a.level == b.level &&
-         sameText(a.riskType, b.riskType) &&
-         sameText(a.direction, b.direction);
-}
-
 static bool isCloseBuzzRisk(const RiskState &risk) {
   if (strcmp(risk.riskType, "front_obstacle") == 0) {
     return risk.distanceMm > 0 && risk.distanceMm <= SMARTCANE_FRONT_BUZZ_CM * 10;
@@ -302,8 +299,37 @@ static bool isGroundFeedbackRisk(const RiskState &risk) {
          strcmp(risk.riskType, "down_sensor_unavailable") == 0;
 }
 
+static bool sameRiskFingerprint(const RiskState &a, const RiskState &b) {
+  if (a.level != b.level ||
+      !sameText(a.riskType, b.riskType) ||
+      !sameText(a.direction, b.direction)) {
+    return false;
+  }
+  // A held confirmed edge retains its sequence and stays quiet. A second
+  // physical stair has a new sequence even when it is the same direction at
+  // the same coarse location, so it is not swallowed by the generic 3 s
+  // feedback re-arm gate.
+  if (isGroundFeedbackRisk(a) || isGroundFeedbackRisk(b)) {
+    return a.groundEventSequence == b.groundEventSequence;
+  }
+  return true;
+}
+
 static bool fallLockActive() {
   return imuFallCurrent().fallLock;
+}
+
+static void rearmOrdinaryFeedbackAfterFallLock() {
+  // A candidate can be cancelled after an ordinary cane movement.  Its lock
+  // correctly silences all other feedback while pending, but it must not make
+  // the next confirmed stair look like the same old cue after recovery.
+  feedbackArmed = true;
+  haveActiveFeedbackRisk = false;
+  riskClearStartedMs = 0;
+  riskFeedbackStartedMs = 0;
+  lastPersistentFeedbackMs = 0;
+  haveActiveFeedbackLocation = false;
+  lastFeedbackMs = 0;
 }
 
 static bool updateRiskFeedbackGate(const RiskState &risk, bool &persistent) {
@@ -326,12 +352,21 @@ static bool updateRiskFeedbackGate(const RiskState &risk, bool &persistent) {
   }
 
   riskClearStartedMs = 0;
+  long latCell;
+  long lngCell;
+  currentLocationCell(latCell, lngCell);
+  const bool locationChanged = !haveActiveFeedbackLocation ||
+      latCell != activeFeedbackLatCell || lngCell != activeFeedbackLngCell;
   bool isNewObstacle = feedbackArmed ||
                        !haveActiveFeedbackRisk ||
-                       !sameRiskFingerprint(risk, activeFeedbackRisk);
+                       !sameRiskFingerprint(risk, activeFeedbackRisk) ||
+                       locationChanged;
   if (isNewObstacle) {
     activeFeedbackRisk = risk;
     haveActiveFeedbackRisk = true;
+    activeFeedbackLatCell = latCell;
+    activeFeedbackLngCell = lngCell;
+    haveActiveFeedbackLocation = true;
     feedbackArmed = false;
     riskFeedbackStartedMs = now;
     lastPersistentFeedbackMs = now;
@@ -1526,6 +1561,7 @@ void loop() {
       }
     } else {
       reflectFallRecoveryInCurrentRisk(latestFall, now);
+      rearmOrdinaryFeedbackAfterFallLock();
     }
     fallStateTelemetryPending = true;
   }

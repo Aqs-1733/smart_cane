@@ -73,6 +73,10 @@ struct RiskState {
   float groundBaselineCm = -1.0f;
   float heightDeltaCm = 0.0f;
   const char *groundState = "GROUND_NORMAL";
+  // Changes only when the down-facing state machine confirms a new physical
+  // stair/drop edge.  It is not a distance threshold and lets the feedback
+  // layer distinguish consecutive stairs from one stationary edge.
+  uint32_t groundEventSequence = 0;
   bool caneMotion = false;
   unsigned long detectedAtMs = 0;
 };

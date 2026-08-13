@@ -92,6 +92,7 @@ static int8_t candidateDirection = 0;  // +1 down, -1 up
 static const char *confirmedGroundRiskType = "none";
 static unsigned long candidateStartedMs = 0;
 static unsigned long confirmedAtMs = 0;
+static uint32_t confirmedGroundEventSequence = 0;
 static unsigned long normalUseStableSinceMs = 0;
 static unsigned long startupRelearnUntilMs = 0;
 static float rebaseLastCm = 0.0f;
@@ -130,6 +131,7 @@ void resetGroundStepDetector() {
   confirmedGroundRiskType = "none";
   candidateStartedMs = 0;
   confirmedAtMs = 0;
+  confirmedGroundEventSequence = 0;
   normalUseStableSinceMs = 0;
   startupRelearnUntilMs = 0;
   rebaseLastCm = 0.0f;
@@ -205,6 +207,7 @@ static void attachGroundTelemetry(RiskState &risk) {
   risk.groundBaselineCm = baselineReady ? baselineDownCm : -1.0f;
   risk.heightDeltaCm = lastHeightDeltaCm;
   risk.groundState = groundStateName();
+  risk.groundEventSequence = confirmedGroundEventSequence;
   risk.caneMotion = lastCaneMotion;
 }
 
@@ -368,6 +371,13 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
     // are sufficient, so a real edge confirms in roughly 200 ms.
     if (poseNearNormal && !caneMotion && directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES) {
       confirmedAtMs = now;
+      // This increment is intentionally at confirmation, not candidate
+      // entry: one physical stair must produce exactly one event, while the
+      // next confirmed stair may alert without waiting for a generic 3 s
+      // obstacle-clear timeout.
+      if (++confirmedGroundEventSequence == 0) {
+        ++confirmedGroundEventSequence;
+      }
       rebaseFrames = 0;
       if (direction < 0) {
         groundState = GROUND_STEP_UP;
@@ -544,6 +554,8 @@ void printRiskState(const RiskState &risk) {
   Serial.print(risk.groundState);
   Serial.print(F(" delta="));
   Serial.print(risk.heightDeltaCm, 1);
+  Serial.print(F(" ground_event="));
+  Serial.print(risk.groundEventSequence);
   Serial.print(F(" confidence="));
   Serial.print(risk.confidence, 2);
   Serial.print(F(" reason="));

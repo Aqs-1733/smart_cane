@@ -560,6 +560,8 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "SMARTCANE_DOWN_NO_TARGET_CM 400" in config
     assert "lastHeightDeltaCm >= SMARTCANE_STEP_DOWN_ENTER_CM" in firmware
     assert "lastHeightDeltaCm <= -SMARTCANE_STEP_UP_ENTER_CM" in firmware
+    assert "confirmedGroundEventSequence" in firmware
+    assert "if (++confirmedGroundEventSequence == 0)" in firmware
     assert "cm > SMARTCANE_DOWN_LONG_DISTANCE_ALARM_CM" not in firmware
     assert "rawCm >= SMARTCANE_DOWN_NO_TARGET_CM" in firmware
     assert "FALL_STAGE_CANDIDATE" in imu
@@ -605,6 +607,7 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert 'cue["is_local_cue"] = true;' in network
     assert 'cue["cue_id"] = cueId;' in network
     assert 'cue["cue_repeat"] = cueRepeat;' in network
+    assert 'cue["ground_event_sequence"] = risk.groundEventSequence;' in network
     assert "[CUE_EVENT] id=" in sketch
     assert "publishLocalCueEvent(currentRisk, persistent, shouldBuzzForRisk(currentRisk));" in sketch
     assert 'cue_source\\\":\\\"formal_fall' in sketch
@@ -618,11 +621,15 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "void discardQueuedOrdinaryUploads()" in network
     assert "xQueueReset(normalPostQueue);" in network
     assert "return enqueueJsonPost(\"/api/risk-events\", body, critical);" in network
+    assert 'strcmp(riskType, "fall_detected") == 0' in network
     assert "normal_use_recovered" in network
     assert "discardQueuedOrdinaryUploads();" in sketch
+    assert "rearmOrdinaryFeedbackAfterFallLock();" in sketch
     assert "!SMARTCANE_IMU_REALTIME_NETWORK_PROTECT" in sketch
     assert "bool wasFallStateTelemetryPending = fallStateTelemetryPending;" in sketch
     assert "if (!wasFallStateTelemetryPending || queued)" in sketch
+    assert "return a.groundEventSequence == b.groundEventSequence;" in sketch
+    assert "const bool locationChanged = !haveActiveFeedbackLocation" in sketch
 
 
 def test_medium_and_high_obstacles_can_become_shared_risk_points():

@@ -569,6 +569,9 @@ bool uploadRiskEvent(const char* riskType,
 
     String body;
     serializeJson(doc, body);
+    // Candidate/confirmed-fall state must always take the independent
+    // priority lane. Normal front/side/ground cue events stay in the ordinary
+    // queue so they can never sit in front of a fall lock at the server.
     bool critical = fallDetected || strcmp(riskType, "fall_detected") == 0 ||
         strcmp(riskType, "sos") == 0;
     return enqueueJsonPost("/api/risk-events", body, critical);
@@ -611,6 +614,7 @@ bool uploadLocalCueEvent(const RiskState& risk,
     cue["cue_id"] = cueId;
     cue["cue_at_ms"] = cueAtMs;
     cue["cue_repeat"] = cueRepeat;
+    cue["ground_event_sequence"] = risk.groundEventSequence;
     cue["buzzer_requested"] = buzzerRequested;
     cue["vibration_requested"] = vibrationRequested;
     cue["firmware_build"] = SMARTCANE_BUILD_TAG;
