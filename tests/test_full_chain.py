@@ -140,6 +140,37 @@ def test_fall_lock_suppresses_distance_feedback_without_time_cooldown(tmp_path, 
     assert response["risk_type"] == "front_obstacle"
 
 
+def test_fall_candidate_contract_is_silent_but_formal_fall_is_an_event(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "fall_candidate_contract.db")
+    main.init_db()
+    candidate = frame(
+        55,
+        front_cm=12,
+        risk_type="none",
+        fall_pending=True,
+        fall_detected=False,
+        fall_stage="fall_lying_wait",
+    )
+    pending = main.create_sensor_frame(candidate, lite=True)
+    assert pending["risk_type"] == "none"
+    assert pending["device_state"]["fallPending"] is True
+    assert pending["device_state"]["fallDetected"] is False
+    assert pending.get("stored_event") is None
+
+    confirmed = frame(
+        55,
+        risk_type="fall_detected",
+        fall_pending=False,
+        fall_detected=True,
+        fall_stage="fall_confirmed",
+        fall_event_id="formal-fall-only-1",
+    )
+    formal = main.create_sensor_frame(confirmed, lite=True)
+    assert formal["risk_type"] == "fall_detected"
+    assert formal["device_state"]["fallPending"] is False
+    assert formal["device_state"]["fallDetected"] is True
+
+
 def test_fall_and_sos_not_road_intrinsic(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "test.db")
     main.init_db()
@@ -577,6 +608,10 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "[CUE_EVENT] id=" in sketch
     assert "publishLocalCueEvent(currentRisk, persistent, shouldBuzzForRisk(currentRisk));" in sketch
     assert 'cue_source\\\":\\\"formal_fall' in sketch
+    assert 'currentRisk.riskType = fall.fallActive ? "fall_detected" : "none";' in sketch
+    assert "fall_candidate_lock_waiting_confirmation" in sketch
+    assert "fallStateTelemetryPending = true;" in sketch
+    assert "reflectFallRecoveryInCurrentRisk" in sketch
 
 
 def test_medium_and_high_obstacles_can_become_shared_risk_points():

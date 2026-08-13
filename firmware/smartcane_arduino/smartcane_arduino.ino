@@ -79,6 +79,8 @@ static unsigned long lastApproachFeedbackMs = 0;
 static unsigned long lastSerialCharMs = 0;
 static String activeFallEventId;
 static uint32_t localCueSequence = 0;
+static bool previousFallLockActive = false;
+static bool fallStateTelemetryPending = false;
 
 static String newFallEventId() {
   uint64_t chip = ESP.getEfuseMac();
@@ -127,6 +129,8 @@ static bool shouldBuzzForRisk(const RiskState &risk);
 static void publishLocalCueEvent(const RiskState &risk,
                                  bool cueRepeat,
                                  bool buzzerRequested);
+static void reflectFallLockInCurrentRisk(const ImuFallState &fall,
+                                         unsigned long now);
 static RiskState stabilizeRisk(const RiskState &measuredRisk);
 static unsigned long telemetryIntervalForRisk(const RiskState &risk);
 
@@ -664,19 +668,6 @@ static void repeatLastCue() {
   runCue(lastCue, false);
 }
 
-static void maybeAutoUploadRisk() {
-  if (fallLockActive() || !networkMode || !hasConcreteRisk(currentRisk)) {
-    return;
-  }
-  if (strcmp(currentRisk.riskType, "history_risk") == 0) {
-    return;
-  }
-  if (currentRisk.level == RISK_LOW && !isDistanceRiskType(currentRisk.riskType)) {
-    return;
-  }
-  uploadEvent(currentRisk, distances, location, "source=auto_detected_once_per_place");
-}
-
 static void uploadUserMark(const char *extra) {
   Serial.println(F("[UPLOAD] user_mark"));
   uploadRiskEvent("user_mark",
@@ -716,6 +707,35 @@ static void handleVoiceRequest() {
                     "voice_request",
                     "source=button_short_press",
                     "short_press");
+}
+
+static void reflectFallLockInCurrentRisk(const ImuFallState &fall,
+                                         unsigned long now) {
+  // Candidate/lying-wait is deliberately encoded as no risk plus
+  // fall_pending=true in the sensor frame.  A real `fall_detected` is set
+  // only after the IMU two-second confirmation and is handled separately.
+  currentRisk = RiskState();
+  currentRisk.level = fall.fallActive ? RISK_HIGH : RISK_LOW;
+  currentRisk.riskType = fall.fallActive ? "fall_detected" : "none";
+  currentRisk.direction = fall.fallActive ? "stop" : "none";
+  currentRisk.sensor = "bmi270_imu";
+  currentRisk.reason = fall.fallActive
+      ? "fall_confirmed_waiting_normal_use_recovery"
+      : "fall_candidate_lock_waiting_confirmation";
+  currentRisk.confidence = fall.confidence;
+  currentRisk.detectedAtMs = now;
+}
+
+static void reflectFallRecoveryInCurrentRisk(const ImuFallState &fall,
+                                             unsigned long now) {
+  // Do not let a stale formal-fall risk type leak into the recovery frame.
+  // This is the server/app clear signal that permits ordinary risk handling
+  // to resume on the next ToF sample.
+  currentRisk = RiskState();
+  currentRisk.sensor = "bmi270_imu";
+  currentRisk.reason = fall.reason;
+  currentRisk.confidence = fall.confidence;
+  currentRisk.detectedAtMs = now;
 }
 
 static void handleFallEvent(const ImuFallState &fall) {
@@ -801,6 +821,9 @@ static void handleFallEvent(const ImuFallState &fall) {
                   activeFallEventId.c_str(),
                   true,
                   "fall_confirmed");
+  // The next sensor frame clears fall_pending and carries formal state to the
+  // device-state endpoint immediately, rather than waiting for its interval.
+  fallStateTelemetryPending = true;
 }
 
 static void uploadCompanionAlert(const char *riskType, RiskLevel level, const char *reason) {
@@ -1026,7 +1049,9 @@ static void publishRiskEventIfNeeded(const RiskState &risk) {
 
   if (hasConcreteRisk(risk)) {
     recordPathPoint(risk);
-    maybeAutoUploadRisk();
+    // Normal risk upload is intentionally deferred until after runCue() in
+    // publishLocalCueEvent(), so one physical cue creates one event and does
+    // not add a second synchronous HTTP POST before the next IMU sample.
     if (risk.level == RISK_HIGH && networkMode && networkAvailable()) {
       lastDeepRiskMs = millis();
       fetchDeepRisk(risk, distances, location, deepRisk);
@@ -1474,6 +1499,27 @@ void loop() {
   if (imuFallConsumeEvent(fall)) {
     handleFallEvent(fall);
   }
+  // Send one immediate *silent* state frame when a candidate lock begins, so
+  // backend/app stop consuming a stale obstacle state.  It carries
+  // fall_pending=true and risk_type=none; it is never a risk event or a voice
+  // trigger.  This happens after the local lock has already been entered.
+  ImuFallState latestFall = imuFallCurrent();
+  if (latestFall.fallLock != previousFallLockActive) {
+    if (latestFall.fallLock) {
+      reflectFallLockInCurrentRisk(latestFall, now);
+      // Candidate lock starts immediately: cancel an old obstacle pulse now,
+      // not one ToF cycle later. A formal fall owns its dedicated two-second
+      // cue, so never cancel that pulse here.
+      if (!latestFall.fallActive) {
+        vibrationStopAll();
+        buzzerStop();
+      }
+    } else {
+      reflectFallRecoveryInCurrentRisk(latestFall, now);
+    }
+    fallStateTelemetryPending = true;
+  }
+  previousFallLockActive = latestFall.fallLock;
   updateGnssLocation();
   networkClientUpdate();
 
@@ -1482,13 +1528,7 @@ void loop() {
     tofRead(distances);
     if (fallLockActive()) {
       ImuFallState lockedFall = imuFallCurrent();
-      currentRisk.level = RISK_HIGH;
-      currentRisk.riskType = "fall_detected";
-      currentRisk.direction = "stop";
-      currentRisk.sensor = "bmi270_imu";
-      currentRisk.reason = "fall_lock_waiting_normal_use_recovery";
-      currentRisk.confidence = lockedFall.confidence;
-      currentRisk.detectedAtMs = now;
+      reflectFallLockInCurrentRisk(lockedFall, now);
       // Candidate/lying-wait locks cancel any old obstacle pulse.  Once the
       // formal event has fired, preserve its dedicated two-second fall pulse;
       // vibrationUpdate() turns it off and no repeat is scheduled.
@@ -1546,7 +1586,8 @@ void loop() {
   }
 
   if (networkMode && networkAvailable() &&
-      now - lastTelemetryUploadMs >= telemetryIntervalForRisk(currentRisk)) {
+      (fallStateTelemetryPending ||
+       now - lastTelemetryUploadMs >= telemetryIntervalForRisk(currentRisk))) {
     lastTelemetryUploadMs = now;
     uploadSensorFrame(currentRisk,
                       distances,
@@ -1562,6 +1603,7 @@ void loop() {
                        // represented as fall_detected or carry the event id.
                        imuFallCurrent().fallActive && strcmp(currentRisk.riskType, "fall_detected") == 0,
                        imuFallCurrent().stage);
+    fallStateTelemetryPending = false;
   }
 
   if (networkMode && networkAvailable() && now - lastNearbyFetchMs >= SMARTCANE_NEARBY_FETCH_INTERVAL_MS) {
