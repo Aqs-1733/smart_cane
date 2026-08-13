@@ -6,6 +6,10 @@
 bool connectWifi();
 bool networkAvailable();
 void networkClientUpdate();
+// Called the instant a BMI270 candidate lock begins. It drops ordinary
+// obstacle/location traffic that has not reached the server yet; candidate
+// and formal-fall frames use the separate critical queue.
+void discardQueuedOrdinaryUploads();
 void printWifiDiagnostics();
 void scanWifiNetworks();
 

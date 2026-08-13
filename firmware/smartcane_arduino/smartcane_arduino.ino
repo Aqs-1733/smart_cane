@@ -1052,7 +1052,12 @@ static void publishRiskEventIfNeeded(const RiskState &risk) {
     // Normal risk upload is intentionally deferred until after runCue() in
     // publishLocalCueEvent(), so one physical cue creates one event and does
     // not add a second synchronous HTTP POST before the next IMU sample.
-    if (risk.level == RISK_HIGH && networkMode && networkAvailable()) {
+    // Deep-risk is an optional cloud lookup with a long response timeout.
+    // Never run it synchronously during normal cane operation: a fall can
+    // begin at any point, and missing its first IMU samples would defeat the
+    // candidate lock. Manual `deep` requests are still supported.
+    if (risk.level == RISK_HIGH && networkMode && networkAvailable() &&
+        !SMARTCANE_IMU_REALTIME_NETWORK_PROTECT) {
       lastDeepRiskMs = millis();
       fetchDeepRisk(risk, distances, location, deepRisk);
     }
@@ -1465,7 +1470,9 @@ void setup() {
   connectWifi();
   if (networkMode && networkAvailable()) {
     uploadLocation(location);
-    fetchNearbyRisks(location.lat, location.lng, nearby);
+    if (!SMARTCANE_IMU_REALTIME_NETWORK_PROTECT) {
+      fetchNearbyRisks(location.lat, location.lng, nearby);
+    }
     currentLocationCell(lastNearbyLatCell, lastNearbyLngCell);
     haveLastNearbyCell = true;
   }
@@ -1507,6 +1514,9 @@ void loop() {
   if (latestFall.fallLock != previousFallLockActive) {
     if (latestFall.fallLock) {
       reflectFallLockInCurrentRisk(latestFall, now);
+      // Do not let an already queued ordinary obstacle cue reach the phone
+      // after the fall candidate has locked all non-fall feedback.
+      discardQueuedOrdinaryUploads();
       // Candidate lock starts immediately: cancel an old obstacle pulse now,
       // not one ToF cycle later. A formal fall owns its dedicated two-second
       // cue, so never cancel that pulse here.
@@ -1589,24 +1599,32 @@ void loop() {
       (fallStateTelemetryPending ||
        now - lastTelemetryUploadMs >= telemetryIntervalForRisk(currentRisk))) {
     lastTelemetryUploadMs = now;
-    uploadSensorFrame(currentRisk,
-                      distances,
-                      location,
-                      imuFallCurrent(),
-                      nullptr,
-                       "source=periodic_real_frame",
-                       nullptr,
-                       (strcmp(currentRisk.riskType, "fall_detected") == 0 && activeFallEventId.length()) ? activeFallEventId.c_str() : nullptr,
-                       imuFallCurrent().fallLock && !imuFallCurrent().fallActive,
-                       // A lying-wait lock is intentionally silent to the
-                       // backend: only a BMI270-confirmed fall may be
-                       // represented as fall_detected or carry the event id.
-                       imuFallCurrent().fallActive && strcmp(currentRisk.riskType, "fall_detected") == 0,
-                       imuFallCurrent().stage);
-    fallStateTelemetryPending = false;
+    bool wasFallStateTelemetryPending = fallStateTelemetryPending;
+    bool queued = uploadSensorFrame(currentRisk,
+                                    distances,
+                                    location,
+                                    imuFallCurrent(),
+                                    nullptr,
+                                    "source=periodic_real_frame",
+                                    nullptr,
+                                    (strcmp(currentRisk.riskType, "fall_detected") == 0 && activeFallEventId.length()) ? activeFallEventId.c_str() : nullptr,
+                                    imuFallCurrent().fallLock && !imuFallCurrent().fallActive,
+                                    // A lying-wait lock is intentionally silent to the
+                                    // backend: only a BMI270-confirmed fall may be
+                                    // represented as fall_detected or carry the event id.
+                                    imuFallCurrent().fallActive && strcmp(currentRisk.riskType, "fall_detected") == 0,
+                                    imuFallCurrent().stage);
+    // A fall transition must never be silently lost because the short
+    // critical queue was momentarily full. Retry it on the next loop without
+    // blocking the IMU task; periodic non-fall telemetry keeps its cadence.
+    if (!wasFallStateTelemetryPending || queued) {
+      fallStateTelemetryPending = false;
+    }
   }
 
-  if (networkMode && networkAvailable() && now - lastNearbyFetchMs >= SMARTCANE_NEARBY_FETCH_INTERVAL_MS) {
+  if (networkMode && networkAvailable() &&
+      !SMARTCANE_IMU_REALTIME_NETWORK_PROTECT &&
+      now - lastNearbyFetchMs >= SMARTCANE_NEARBY_FETCH_INTERVAL_MS) {
     lastNearbyFetchMs = now;
     long latCell;
     long lngCell;

@@ -612,6 +612,17 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "fall_candidate_lock_waiting_confirmation" in sketch
     assert "fallStateTelemetryPending = true;" in sketch
     assert "reflectFallRecoveryInCurrentRisk" in sketch
+    assert "SMARTCANE_IMU_REALTIME_NETWORK_PROTECT 1" in config
+    assert "async uploader ready; IMU loop is non-blocking" in network
+    assert "static bool enqueueJsonPost" in network
+    assert "void discardQueuedOrdinaryUploads()" in network
+    assert "xQueueReset(normalPostQueue);" in network
+    assert "return enqueueJsonPost(\"/api/risk-events\", body, critical);" in network
+    assert "normal_use_recovered" in network
+    assert "discardQueuedOrdinaryUploads();" in sketch
+    assert "!SMARTCANE_IMU_REALTIME_NETWORK_PROTECT" in sketch
+    assert "bool wasFallStateTelemetryPending = fallStateTelemetryPending;" in sketch
+    assert "if (!wasFallStateTelemetryPending || queued)" in sketch
 
 
 def test_medium_and_high_obstacles_can_become_shared_risk_points():

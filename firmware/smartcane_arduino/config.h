@@ -7,7 +7,7 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-fall-candidate-lock-contract-20260813"
+#define SMARTCANE_BUILD_TAG "arduino-fall-realtime-network-isolation-20260813"
 #define SMARTCANE_DEVICE_ID "cane_001"
 #ifndef SMARTCANE_DEVICE_NAME
 #define SMARTCANE_DEVICE_NAME "智能盲杖01"
@@ -145,6 +145,25 @@
 #define SMARTCANE_SENSOR_FRAME_HTTP_TIMEOUT_MS 1200
 #define SMARTCANE_DEEP_RISK_HTTP_TIMEOUT_MS 5000
 #define SMARTCANE_HTTP_FAIL_LOG_INTERVAL_MS 5000
+// Network uploads must never pause the BMI270 fall sequence.  POST-only
+// telemetry is queued to a low-priority worker; fall candidate/confirmed
+// frames use its separate critical queue.  The optional nearby/deep lookups
+// remain available from manual serial/touch commands, but are not run
+// automatically while the real-time IMU protection is enabled.
+#define SMARTCANE_IMU_REALTIME_NETWORK_PROTECT 1
+#define SMARTCANE_ASYNC_HTTP_BODY_MAX_BYTES 2048
+#define SMARTCANE_ASYNC_HTTP_NORMAL_QUEUE_DEPTH 4
+#define SMARTCANE_ASYNC_HTTP_CRITICAL_QUEUE_DEPTH 4
+#define SMARTCANE_ASYNC_HTTP_WORKER_STACK_BYTES 6144
+// Arduino's loopTask is priority 1. Match it so a busy loop cannot starve
+// queued uploads; FreeRTOS time-slices the two tasks while the worker is in
+// HTTPClient. The worker blocks on its queues whenever there is no upload.
+#define SMARTCANE_ASYNC_HTTP_WORKER_PRIORITY 1
+// A local normal-risk cue is already delivered by the cane itself. If the
+// server is slow, abandon its stale POST quickly so a subsequent fall-pending
+// state cannot wait behind it. Critical fall/SOS uploads retain their normal
+// endpoint-specific timeouts.
+#define SMARTCANE_ASYNC_HTTP_NORMAL_TIMEOUT_MS 350
 #define SMARTCANE_SOS_HOLD_MS 2000
 #define SMARTCANE_BUTTON_DEBOUNCE_MS 40
 #define SMARTCANE_TOUCH_LONG_PRESS_MS 1000

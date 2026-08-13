@@ -3,6 +3,9 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 #include <string.h>
 
 #include "config.h"
@@ -12,6 +15,21 @@ static unsigned long lastNetworkUnavailableLogMs = 0;
 static unsigned long lastWifiStatusLogMs = 0;
 static unsigned long lastSensorFramePostFailLogMs = 0;
 static bool lastReportedWifiConnected = false;
+
+// A direct HTTPClient::POST can block for the configured timeout (2.5 s for
+// ordinary events).  That is long enough to miss the BMI270 impact/tilt
+// samples which must start the fall lock.  Keep POST-only requests out of the
+// Arduino loop task.  The critical queue is reserved for fall_pending and
+// formal-fall state, so regular location/cue traffic cannot fill it.
+struct AsyncJsonPost {
+    char path[48];
+    char body[SMARTCANE_ASYNC_HTTP_BODY_MAX_BYTES];
+    bool critical;
+};
+
+static QueueHandle_t normalPostQueue = nullptr;
+static QueueHandle_t criticalPostQueue = nullptr;
+static TaskHandle_t asyncPostWorkerHandle = nullptr;
 
 static bool wifiConfigured() {
     String ssid = SMARTCANE_WIFI_SSID;
@@ -136,7 +154,10 @@ static void printNetworkUnavailable() {
     Serial.println(F("[NET] network unavailable"));
 }
 
-static bool postJson(const char* path, const String& body, String* responseOut = nullptr) {
+static bool postJson(const char* path,
+                     const String& body,
+                     String* responseOut = nullptr,
+                     uint16_t timeoutOverrideMs = 0) {
     if (!networkAvailable()) {
         printNetworkUnavailable();
         return false;
@@ -149,7 +170,7 @@ static bool postJson(const char* path, const String& body, String* responseOut =
         Serial.println(url);
         return false;
     }
-    http.setTimeout(timeoutForPostPath(path));
+    http.setTimeout(timeoutOverrideMs > 0 ? timeoutOverrideMs : timeoutForPostPath(path));
     http.setReuse(false);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Connection", "close");
@@ -196,6 +217,97 @@ static bool postJson(const char* path, const String& body, String* responseOut =
         Serial.println(F(" OK"));
     }
     return true;
+}
+
+static void asyncPostWorker(void*) {
+    AsyncJsonPost request{};
+    for (;;) {
+        // Always drain candidate/confirmed-fall frames before ordinary cue or
+        // location traffic.  A short normal wait leaves critical work with a
+        // bounded hand-off delay while the worker is idle.
+        if (xQueueReceive(criticalPostQueue, &request, 0) == pdTRUE ||
+            xQueueReceive(normalPostQueue, &request, pdMS_TO_TICKS(100)) == pdTRUE) {
+            postJson(request.path,
+                     String(request.body),
+                     nullptr,
+                     request.critical ? 0 : SMARTCANE_ASYNC_HTTP_NORMAL_TIMEOUT_MS);
+        }
+    }
+}
+
+static bool ensureAsyncPostWorker() {
+    if (asyncPostWorkerHandle != nullptr) {
+        return true;
+    }
+
+    normalPostQueue = xQueueCreate(SMARTCANE_ASYNC_HTTP_NORMAL_QUEUE_DEPTH,
+                                   sizeof(AsyncJsonPost));
+    criticalPostQueue = xQueueCreate(SMARTCANE_ASYNC_HTTP_CRITICAL_QUEUE_DEPTH,
+                                     sizeof(AsyncJsonPost));
+    if (normalPostQueue == nullptr || criticalPostQueue == nullptr) {
+        Serial.println(F("[NET] async upload queue allocation failed"));
+        return false;
+    }
+
+    BaseType_t started = xTaskCreate(asyncPostWorker,
+                                     "cane_http",
+                                     SMARTCANE_ASYNC_HTTP_WORKER_STACK_BYTES,
+                                     nullptr,
+                                     SMARTCANE_ASYNC_HTTP_WORKER_PRIORITY,
+                                     &asyncPostWorkerHandle);
+    if (started != pdPASS) {
+        Serial.println(F("[NET] async upload worker start failed"));
+        asyncPostWorkerHandle = nullptr;
+        return false;
+    }
+
+    Serial.println(F("[NET] async uploader ready; IMU loop is non-blocking"));
+    return true;
+}
+
+static bool enqueueJsonPost(const char* path, const String& body, bool critical) {
+    if (!networkAvailable()) {
+        printNetworkUnavailable();
+        return false;
+    }
+    if (!ensureAsyncPostWorker()) {
+        // Do not fall back to a synchronous POST here: preserving the 50 ms
+        // fall sample cadence is more important than one non-critical upload.
+        return false;
+    }
+    AsyncJsonPost request{};
+    if (strlen(path) >= sizeof(request.path) ||
+        body.length() >= sizeof(request.body)) {
+        Serial.print(F("[NET] async POST too large, dropped path="));
+        Serial.println(path);
+        return false;
+    }
+
+    strncpy(request.path, path, sizeof(request.path) - 1);
+    request.path[sizeof(request.path) - 1] = '\0';
+    memcpy(request.body, body.c_str(), body.length());
+    request.body[body.length()] = '\0';
+    request.critical = critical;
+
+    QueueHandle_t queue = critical ? criticalPostQueue : normalPostQueue;
+    if (xQueueSend(queue, &request, 0) != pdTRUE) {
+        Serial.print(F("[NET] async "));
+        Serial.print(critical ? F("critical") : F("normal"));
+        Serial.print(F(" queue full, dropped path="));
+        Serial.println(path);
+        return false;
+    }
+    return true;
+}
+
+void discardQueuedOrdinaryUploads() {
+    if (normalPostQueue != nullptr) {
+        // This runs in loopTask, while the low-priority worker may be waiting
+        // on the queue. FreeRTOS synchronises the reset; an HTTP request that
+        // has already begun cannot be cancelled, but no later stale obstacle
+        // or location event will be sent after a fall candidate starts.
+        xQueueReset(normalPostQueue);
+    }
 }
 
 static bool getJson(const String& url, String& responseOut) {
@@ -360,6 +472,10 @@ void networkClientUpdate() {
     unsigned long now = millis();
 
     if (networkAvailable()) {
+        // Initialise only after Wi-Fi is usable. The worker has a lower
+        // priority than loopTask, so slow server responses cannot suspend IMU
+        // reads, and an offline bench test does not reserve its queue memory.
+        ensureAsyncPostWorker();
         if (!lastReportedWifiConnected) {
             Serial.print(F("[NET] Wi-Fi OK ip="));
             Serial.println(WiFi.localIP());
@@ -411,7 +527,7 @@ bool uploadLocation(const LocationData& location) {
 
     String body;
     serializeJson(doc, body);
-    return postJson("/api/locations", body);
+    return enqueueJsonPost("/api/locations", body, false);
 }
 
 bool uploadRiskEvent(const char* riskType,
@@ -453,7 +569,9 @@ bool uploadRiskEvent(const char* riskType,
 
     String body;
     serializeJson(doc, body);
-    return postJson("/api/risk-events", body);
+    bool critical = fallDetected || strcmp(riskType, "fall_detected") == 0 ||
+        strcmp(riskType, "sos") == 0;
+    return enqueueJsonPost("/api/risk-events", body, critical);
 }
 
 bool uploadEvent(const RiskState& risk,
@@ -581,7 +699,9 @@ bool uploadSensorFrame(const RiskState& risk,
 
     String body;
     serializeJson(doc, body);
-    return postJson("/api/sensor-frames?lite=1", body);
+    bool fallStateTransition = fallPending || fallAlert ||
+        (explicitFallStage != nullptr && strcmp(explicitFallStage, "normal_use_recovered") == 0);
+    return enqueueJsonPost("/api/sensor-frames?lite=1", body, fallStateTransition);
 }
 
 bool fetchNearbyRisks(double lat, double lng, NearbyRiskSummary& out) {
