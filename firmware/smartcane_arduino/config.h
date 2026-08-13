@@ -7,7 +7,7 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-fall-candidate-restore-20260813"
+#define SMARTCANE_BUILD_TAG "arduino-ground-probe-gate-20260813"
 #define SMARTCANE_DEVICE_ID "cane_001"
 #ifndef SMARTCANE_DEVICE_NAME
 #define SMARTCANE_DEVICE_NAME "智能盲杖01"
@@ -199,6 +199,11 @@
 // a brief upward sweep was reported as a drop after the hand stopped.
 #define SMARTCANE_STEP_NORMAL_POSE_SETTLE_MS 250
 #define SMARTCANE_DOWN_NORMAL_POSE_DELTA_DEG 18.0f
+// A ground edge may only be confirmed when the cane returns to the learned
+// probing angle.  This is intentionally tighter than NORMAL_POSE: changing
+// the cane inclination to touch/raise it on flat ground must not look like a
+// lower floor.
+#define SMARTCANE_DOWN_PROBE_POSE_DELTA_DEG 5.0f
 #define SMARTCANE_DOWN_MOTION_POSE_DELTA_DEG 10.0f
 #define SMARTCANE_DOWN_MOTION_GYRO_DPS 35.0f
 #define SMARTCANE_DOWN_NORMAL_G_DELTA 0.18f
