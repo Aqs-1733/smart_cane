@@ -134,6 +134,7 @@ static void publishLocalCueEvent(const RiskState &risk,
                                  bool buzzerRequested);
 static void reflectFallLockInCurrentRisk(const ImuFallState &fall,
                                          unsigned long now);
+static void serviceFallState(unsigned long now);
 static RiskState stabilizeRisk(const RiskState &measuredRisk);
 static unsigned long telemetryIntervalForRisk(const RiskState &risk);
 
@@ -861,6 +862,39 @@ static void handleFallEvent(const ImuFallState &fall) {
   fallStateTelemetryPending = true;
 }
 
+static void serviceFallState(unsigned long now) {
+  ImuFallState fall;
+  if (imuFallConsumeEvent(fall)) {
+    handleFallEvent(fall);
+  }
+
+  // A candidate must become exclusive as soon as the IMU produces it.  This
+  // helper is called both before and immediately after a ToF sweep: a rapid
+  // tilt can happen during the four ranging reads, so waiting for the next
+  // loop would otherwise allow this sweep to announce a stale obstacle.
+  ImuFallState latestFall = imuFallCurrent();
+  if (latestFall.fallLock != previousFallLockActive) {
+    if (latestFall.fallLock) {
+      reflectFallLockInCurrentRisk(latestFall, now);
+      // Do not let an already queued ordinary obstacle cue reach the phone
+      // after the fall candidate has locked all non-fall feedback.
+      discardQueuedOrdinaryUploads();
+      // Candidate lock starts immediately: cancel an old obstacle pulse now,
+      // not one ToF cycle later. A formal fall owns its dedicated two-second
+      // cue, so never cancel that pulse here.
+      if (!latestFall.fallActive) {
+        vibrationStopAll();
+        buzzerStop();
+      }
+    } else {
+      reflectFallRecoveryInCurrentRisk(latestFall, now);
+      rearmOrdinaryFeedbackAfterFallLock();
+    }
+    fallStateTelemetryPending = true;
+  }
+  previousFallLockActive = latestFall.fallLock;
+}
+
 static void uploadCompanionAlert(const char *riskType, RiskLevel level, const char *reason) {
   unsigned long now = millis();
   if (lastCompanionAlertMs != 0 &&
@@ -1537,41 +1571,18 @@ void loop() {
   touchUpdate(handleTouchEvent);
   handleSerialInput();
   imuFallUpdate();
-  ImuFallState fall;
-  if (imuFallConsumeEvent(fall)) {
-    handleFallEvent(fall);
-  }
-  // Send one immediate *silent* state frame when a candidate lock begins, so
-  // backend/app stop consuming a stale obstacle state.  It carries
-  // fall_pending=true and risk_type=none; it is never a risk event or a voice
-  // trigger.  This happens after the local lock has already been entered.
-  ImuFallState latestFall = imuFallCurrent();
-  if (latestFall.fallLock != previousFallLockActive) {
-    if (latestFall.fallLock) {
-      reflectFallLockInCurrentRisk(latestFall, now);
-      // Do not let an already queued ordinary obstacle cue reach the phone
-      // after the fall candidate has locked all non-fall feedback.
-      discardQueuedOrdinaryUploads();
-      // Candidate lock starts immediately: cancel an old obstacle pulse now,
-      // not one ToF cycle later. A formal fall owns its dedicated two-second
-      // cue, so never cancel that pulse here.
-      if (!latestFall.fallActive) {
-        vibrationStopAll();
-        buzzerStop();
-      }
-    } else {
-      reflectFallRecoveryInCurrentRisk(latestFall, now);
-      rearmOrdinaryFeedbackAfterFallLock();
-    }
-    fallStateTelemetryPending = true;
-  }
-  previousFallLockActive = latestFall.fallLock;
+  serviceFallState(now);
   updateGnssLocation();
   networkClientUpdate();
 
   if (now - lastSensorMs >= SMARTCANE_SENSOR_INTERVAL_MS) {
     lastSensorMs = now;
     tofRead(distances);
+    // `tofRead()` performs four I2C ranging reads.  Take a fresh BMI270
+    // sample immediately afterwards and apply a newly entered candidate lock
+    // before this ToF frame can be classified or cued as an ordinary risk.
+    imuFallUpdate();
+    serviceFallState(millis());
     if (fallLockActive()) {
       ImuFallState lockedFall = imuFallCurrent();
       reflectFallLockInCurrentRisk(lockedFall, now);

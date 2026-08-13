@@ -140,6 +140,15 @@ def test_fall_lock_suppresses_distance_feedback_without_time_cooldown(tmp_path, 
     assert response["risk_type"] == "front_obstacle"
 
 
+def test_firmware_services_fall_lock_after_tof_before_ordinary_risk_calculation():
+    firmware = (ROOT / "firmware" / "smartcane_arduino" / "smartcane_arduino.ino").read_text(encoding="utf-8")
+    sensor_loop = firmware[firmware.index("if (now - lastSensorMs >= SMARTCANE_SENSOR_INTERVAL_MS)"):]
+    tof_index = sensor_loop.index("tofRead(distances);")
+    fall_index = sensor_loop.index("serviceFallState(millis());")
+    risk_index = sensor_loop.index("currentRisk = stabilizeRisk(calculateRisk")
+    assert tof_index < fall_index < risk_index
+
+
 def test_fall_candidate_contract_is_silent_but_formal_fall_is_an_event(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "fall_candidate_contract.db")
     main.init_db()

@@ -7,7 +7,7 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-fall-lock-ground-rearm-20260813"
+#define SMARTCANE_BUILD_TAG "arduino-fall-post-tof-lock-20260813"
 #define SMARTCANE_DEVICE_ID "cane_001"
 #ifndef SMARTCANE_DEVICE_NAME
 #define SMARTCANE_DEVICE_NAME "智能盲杖01"
