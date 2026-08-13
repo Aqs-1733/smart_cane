@@ -6,6 +6,8 @@ void buzzerBegin();
 void buzzerUpdate();
 void buzzerSetEnabled(bool enabled);
 bool buzzerIsEnabled();
+// True while a scheduled local tone is still driving the buzzer pin.
+bool buzzerAlertActive();
 void buzzerStop();
 void beep(uint16_t ms);
 void beepPatternDanger();

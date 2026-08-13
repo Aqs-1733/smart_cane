@@ -137,12 +137,17 @@ def test_firmware_ordinary_cues_are_one_shot_and_network_bounded():
     sketch = (ROOT / "firmware" / "smartcane_arduino" / "smartcane_arduino.ino").read_text(encoding="utf-8")
     network = (ROOT / "firmware" / "smartcane_arduino" / "network_client.cpp").read_text(encoding="utf-8")
     gate = sketch[sketch.index("static bool updateRiskFeedbackGate"):sketch.index("static bool isDistanceRiskType")]
-    assert "SMARTCANE_EVENT_HTTP_TIMEOUT_MS 300" in config
-    assert "SMARTCANE_SENSOR_FRAME_HTTP_TIMEOUT_MS 350" in config
+    assert "SMARTCANE_EVENT_HTTP_TIMEOUT_MS 120" in config
+    assert "SMARTCANE_SENSOR_FRAME_HTTP_TIMEOUT_MS 120" in config
+    assert "SMARTCANE_BACKGROUND_HTTP_TIMEOUT_MS 120" in config
     assert "if (strncmp(path, \"/api/risk-events\"" in network
     assert "SMARTCANE_EVENT_HTTP_TIMEOUT_MS" in network
     assert "SMARTCANE_RISK_PERSISTENT_REPEAT_MS" not in gate
+    assert "now - lastFeedbackMs < SMARTCANE_FEEDBACK_REPEAT_MS" in gate
     assert "beepPatternDanger();" not in sketch[sketch.index("static void runCue"):sketch.index("static FeedbackCue cueForRisk")]
+    assert "applyFeedbackForRisk(currentRisk, false, true);" in sketch
+    assert "if (buzzerAlertActive())" in sketch
+    assert "serviceLocalCueUpload(now);" in sketch
 
 
 def test_fall_lock_suppresses_distance_feedback_without_time_cooldown(tmp_path, monkeypatch):

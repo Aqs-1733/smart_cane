@@ -127,6 +127,9 @@ static uint16_t timeoutForPostPath(const char* path) {
     if (strncmp(path, "/api/sensor-frames", strlen("/api/sensor-frames")) == 0) {
         return SMARTCANE_SENSOR_FRAME_HTTP_TIMEOUT_MS;
     }
+    if (strncmp(path, "/api/locations", strlen("/api/locations")) == 0) {
+        return SMARTCANE_BACKGROUND_HTTP_TIMEOUT_MS;
+    }
     if (strncmp(path, "/api/ai/deep-risk", strlen("/api/ai/deep-risk")) == 0) {
         return SMARTCANE_DEEP_RISK_HTTP_TIMEOUT_MS;
     }
@@ -217,7 +220,9 @@ static bool getJson(const String& url, String& responseOut) {
         Serial.println(url);
         return false;
     }
-    http.setTimeout(SMARTCANE_HTTP_TIMEOUT_MS);
+    // Nearby-history data is advisory only.  It must not stall the 100 ms
+    // local ToF/IMU loop when a remote server or hotspot is slow.
+    http.setTimeout(SMARTCANE_BACKGROUND_HTTP_TIMEOUT_MS);
     http.setReuse(false);
     http.addHeader("Connection", "close");
     int code = http.GET();

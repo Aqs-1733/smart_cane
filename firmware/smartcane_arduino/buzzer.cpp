@@ -44,6 +44,10 @@ bool buzzerIsEnabled() {
   return buzzerEnabled;
 }
 
+bool buzzerAlertActive() {
+  return singleBeepActive || patternActive;
+}
+
 void buzzerStop() {
   singleBeepActive = false;
   patternActive = false;

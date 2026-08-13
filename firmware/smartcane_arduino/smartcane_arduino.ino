@@ -80,6 +80,15 @@ static String activeFallEventId;
 static uint32_t localCueSequence = 0;
 static bool previousFallLockActive = false;
 static bool fallStateTelemetryPending = false;
+static bool localCueUploadPending = false;
+static RiskState pendingCueRisk;
+static DistanceReadings pendingCueDistances;
+static LocationData pendingCueLocation;
+static String pendingCueId;
+static unsigned long pendingCueAtMs = 0;
+static bool pendingCueRepeat = false;
+static bool pendingCueBuzzerRequested = false;
+static bool pendingCueVibrationRequested = false;
 
 static String newFallEventId() {
   uint64_t chip = ESP.getEfuseMac();
@@ -128,6 +137,8 @@ static bool shouldBuzzForRisk(const RiskState &risk);
 static void publishLocalCueEvent(const RiskState &risk,
                                  bool cueRepeat,
                                  bool buzzerRequested);
+static void serviceLocalCueUpload(unsigned long now);
+static void clearPendingLocalCueUpload();
 static void reflectFallLockInCurrentRisk(const ImuFallState &fall,
                                          unsigned long now);
 static void serviceFallState(unsigned long now);
@@ -310,6 +321,21 @@ static bool sameRiskFingerprint(const RiskState &a, const RiskState &b) {
   return true;
 }
 
+static bool sameFeedbackEvent(const RiskState &a, const RiskState &b) {
+  // A front obstacle can legitimately alternate between slow/turn-left/
+  // turn-right as the side beams fluctuate.  That is one physical obstacle,
+  // not three new beep events.  The detailed direction still reaches the
+  // backend in the one queued local-cue event.
+  if (a.level == b.level &&
+      sameText(a.riskType, b.riskType) &&
+      (strcmp(a.riskType, "front_obstacle") == 0 ||
+       strcmp(a.riskType, "left_obstacle") == 0 ||
+       strcmp(a.riskType, "right_obstacle") == 0)) {
+    return true;
+  }
+  return sameRiskFingerprint(a, b);
+}
+
 static bool fallLockActive() {
   return imuFallCurrent().fallLock;
 }
@@ -343,9 +369,16 @@ static bool updateRiskFeedbackGate(const RiskState &risk, bool &persistent) {
   }
 
   riskClearStartedMs = 0;
+  // A noisy boundary can alternate front/left/right classification faster
+  // than the 120 ms tone finishes.  Do not restart that tone: keep the
+  // ordinary cue rate bounded and let the latest stable risk win afterward.
+  if (lastFeedbackMs != 0 &&
+      now - lastFeedbackMs < SMARTCANE_FEEDBACK_REPEAT_MS) {
+    return false;
+  }
   bool isNewObstacle = feedbackArmed ||
                        !haveActiveFeedbackRisk ||
-                       !sameRiskFingerprint(risk, activeFeedbackRisk);
+                       !sameFeedbackEvent(risk, activeFeedbackRisk);
   if (isNewObstacle) {
     activeFeedbackRisk = risk;
     haveActiveFeedbackRisk = true;
@@ -653,14 +686,58 @@ static void publishLocalCueEvent(const RiskState &risk,
     return;
   }
 
-  uploadLocalCueEvent(risk,
-                      distances,
-                      location,
-                      cueId.c_str(),
-                      cueAtMs,
-                      cueRepeat,
-                      buzzerRequested,
-                      vibrationRequested);
+  // Do not open a synchronous HTTP connection while a short local tone is
+  // active.  On a slow hotspot that left the buzzer pin active until the
+  // request returned, which made the first normal obstacle sound continuous.
+  // Keeping only the newest cue also prevents the phone from hearing an old
+  // obstacle after the cane has moved on.
+  pendingCueRisk = risk;
+  pendingCueDistances = distances;
+  pendingCueLocation = location;
+  pendingCueId = cueId;
+  pendingCueAtMs = cueAtMs;
+  pendingCueRepeat = cueRepeat;
+  pendingCueBuzzerRequested = buzzerRequested;
+  pendingCueVibrationRequested = vibrationRequested;
+  localCueUploadPending = true;
+}
+
+static void clearPendingLocalCueUpload() {
+  localCueUploadPending = false;
+  pendingCueId = "";
+  pendingCueAtMs = 0;
+  pendingCueRepeat = false;
+  pendingCueBuzzerRequested = false;
+  pendingCueVibrationRequested = false;
+}
+
+static void serviceLocalCueUpload(unsigned long now) {
+  (void)now;
+  if (!localCueUploadPending) {
+    return;
+  }
+  // A fall candidate is exclusive and silent.  Never send an older ordinary
+  // cue after it has taken the safety lock.
+  if (fallLockActive()) {
+    clearPendingLocalCueUpload();
+    return;
+  }
+  if (buzzerAlertActive()) {
+    return;
+  }
+  if (!networkMode || !networkAvailable()) {
+    clearPendingLocalCueUpload();
+    return;
+  }
+  uploadLocalCueEvent(pendingCueRisk,
+                      pendingCueDistances,
+                      pendingCueLocation,
+                      pendingCueId.c_str(),
+                      pendingCueAtMs,
+                      pendingCueRepeat,
+                      pendingCueBuzzerRequested,
+                      pendingCueVibrationRequested);
+  clearPendingLocalCueUpload();
 }
 
 static void repeatLastCue() {
@@ -848,6 +925,7 @@ static void serviceFallState(unsigned long now) {
     // Candidate/lying-wait are locally silent but exclusive. The two-second
     // formal fall pulse is already running when fallActive is true.
     reflectFallLockInCurrentRisk(latestFall, now);
+    clearPendingLocalCueUpload();
     if (!latestFall.fallActive) {
       vibrationStopAll();
       buzzerStop();
@@ -1531,6 +1609,7 @@ void loop() {
   serviceFallState(now);
   updateGnssLocation();
   networkClientUpdate();
+  serviceLocalCueUpload(now);
 
   if (now - lastSensorMs >= SMARTCANE_SENSOR_INTERVAL_MS) {
     lastSensorMs = now;
@@ -1556,7 +1635,7 @@ void loop() {
       monitorCompanionAlerts(currentRisk);
       bool persistent = false;
       if (updateRiskFeedbackGate(currentRisk, persistent)) {
-        applyFeedbackForRisk(currentRisk, true, true);
+        applyFeedbackForRisk(currentRisk, false, true);
         publishLocalCueEvent(currentRisk, persistent, shouldBuzzForRisk(currentRisk));
       }
     }
