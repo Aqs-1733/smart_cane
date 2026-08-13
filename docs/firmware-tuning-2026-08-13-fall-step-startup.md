@@ -1,5 +1,10 @@
 # Firmware tuning snapshot — 2026-08-13
 
+> Superseded for fall-candidate sensitivity by
+> `backup/pre-restore-fall-candidate-20260813`: the verified original fall
+> candidate values (`>1.22g`, `<0.85g`, jerk `>2.2g/s`) were restored in a
+> follow-up commit.  The step sweep filter and startup cue guard below remain.
+
 ## Complete pre-change backup
 
 - Git tag: `backup/pre-fall-step-startup-20260813`

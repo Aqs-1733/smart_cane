@@ -606,10 +606,9 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "bool rapidTiltStart = angleFromBaseline >= SMARTCANE_FALL_FAST_ANGLE_DEG" in imu
     assert "float verticalAccelG = baseMag > 0.01f ? dot / baseMag : state.totalG;" in imu
     assert "bool verticalAccelTrigger = verticalAccelG > SMARTCANE_FALL_ACCEL_HIGH_G" in imu
-    assert "SMARTCANE_FALL_ACCEL_HIGH_G 1.32f" in config
-    assert "SMARTCANE_FALL_ACCEL_LOW_G 0.75f" in config
-    assert "SMARTCANE_FALL_VERTICAL_JERK_TRIGGER_G_PER_S 3.0f" in config
-    assert "verticalJerkGPerSec > SMARTCANE_FALL_VERTICAL_JERK_TRIGGER_G_PER_S" in imu
+    assert "SMARTCANE_FALL_ACCEL_HIGH_G 1.22f" in config
+    assert "SMARTCANE_FALL_ACCEL_LOW_G 0.85f" in config
+    assert "verticalJerkGPerSec > 2.2f" in imu
     assert "bool impactAssistedTiltStart = (verticalAccelTrigger || verticalJerkTrigger)" in imu
     assert "bool impactCandidateStart = verticalAccelTrigger || verticalJerkTrigger;" in imu
     assert "normal_use_vertical_accel_lock_waiting_lying" in imu

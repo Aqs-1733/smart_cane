@@ -7,7 +7,7 @@
  */
 
 // Device and backend.
-#define SMARTCANE_BUILD_TAG "arduino-fall-step-startup-guard-20260813"
+#define SMARTCANE_BUILD_TAG "arduino-fall-candidate-restore-20260813"
 #define SMARTCANE_DEVICE_ID "cane_001"
 #ifndef SMARTCANE_DEVICE_NAME
 #define SMARTCANE_DEVICE_NAME "智能盲杖01"
@@ -237,11 +237,10 @@
 #define SMARTCANE_IMU_STREAM_INTERVAL_MS 500
 #define SMARTCANE_IMU_RAW_PRINT_REGS 0
 // Candidate-lock thresholds apply only to acceleration along the learned
-// normal-use gravity vector.  Keep a real vertical fall responsive, while a
-// light hand wave no longer starts a silent fall candidate.
-#define SMARTCANE_FALL_ACCEL_HIGH_G 1.32f
-#define SMARTCANE_FALL_ACCEL_LOW_G 0.75f
-#define SMARTCANE_FALL_VERTICAL_JERK_TRIGGER_G_PER_S 3.0f
+// normal-use gravity vector.  These are the verified original values: a
+// candidate is still silent and requires the unchanged lying confirmation.
+#define SMARTCANE_FALL_ACCEL_HIGH_G 1.22f
+#define SMARTCANE_FALL_ACCEL_LOW_G 0.85f
 #define SMARTCANE_FALL_GYRO_TRIGGER_DPS 35.0f
 #define SMARTCANE_FALL_FAST_ANGLE_DEG 45.0f
 #define SMARTCANE_FALL_CANDIDATE_ANGLE_DEG 30.0f

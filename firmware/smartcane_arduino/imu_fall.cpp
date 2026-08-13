@@ -469,8 +469,7 @@ static bool readAccel() {
                              verticalAccelG < SMARTCANE_FALL_ACCEL_LOW_G;
   bool gyroTrigger = state.gyroDps > SMARTCANE_FALL_GYRO_TRIGGER_DPS;
   bool tiltRateTrigger = state.tiltRateDps > SMARTCANE_FALL_FAST_TILT_RATE_DPS;
-  bool verticalJerkTrigger =
-      verticalJerkGPerSec > SMARTCANE_FALL_VERTICAL_JERK_TRIGGER_G_PER_S;
+  bool verticalJerkTrigger = verticalJerkGPerSec > 2.2f;
   // A fast large relative tilt is sufficient to start a fall candidate; an
   // impact is useful evidence but is deliberately not mandatory. This covers
   // the common soft-cushion/controlled fall where acceleration is damped.
