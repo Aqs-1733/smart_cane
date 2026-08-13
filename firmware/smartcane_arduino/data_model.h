@@ -73,6 +73,9 @@ struct RiskState {
   float groundBaselineCm = -1.0f;
   float heightDeltaCm = 0.0f;
   const char *groundState = "GROUND_NORMAL";
+  // Advances only when the ground state machine confirms a new physical
+  // stair/drop. It is used for cue de-duplication, never for detection.
+  uint32_t groundEventSequence = 0;
   bool caneMotion = false;
   unsigned long detectedAtMs = 0;
 };

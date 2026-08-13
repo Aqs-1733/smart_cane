@@ -99,6 +99,19 @@ static uint8_t rebaseFrames = 0;
 static float lastCompensatedDownCm = -1.0f;
 static float lastHeightDeltaCm = 0.0f;
 static bool lastCaneMotion = false;
+static uint32_t confirmedGroundEventSequence = 0;
+
+// roll is normalized to [-180, 180], so -179 and +179 are adjacent physical
+// poses, not a 358-degree cane movement.
+static float wrappedAngleDeltaDeg(float valueDeg, float referenceDeg) {
+  float delta = fmodf(valueDeg - referenceDeg + 180.0f, 360.0f);
+  if (delta < 0.0f) delta += 360.0f;
+  return delta - 180.0f;
+}
+
+static float blendWrappedAngleDeg(float previousDeg, float sampleDeg, float alpha) {
+  return previousDeg + wrappedAngleDeltaDeg(sampleDeg, previousDeg) * alpha;
+}
 
 static const char *groundStateName() {
   switch (groundState) {
@@ -137,6 +150,7 @@ void resetGroundStepDetector() {
   lastCompensatedDownCm = -1.0f;
   lastHeightDeltaCm = 0.0f;
   lastCaneMotion = false;
+  confirmedGroundEventSequence = 0;
 }
 
 int groundBaselineDownCm() {
@@ -160,7 +174,7 @@ static float projectedDownCm(int rawCm, const ImuFallState &imu) {
 static bool imuAtNormalUsePose(const ImuFallState &imu) {
   return !imu.available ||
       (fabsf(imu.pitchDeg - normalUsePitchDeg) <= SMARTCANE_DOWN_NORMAL_POSE_DELTA_DEG &&
-       fabsf(imu.rollDeg - normalUseRollDeg) <= SMARTCANE_DOWN_NORMAL_POSE_DELTA_DEG &&
+       fabsf(wrappedAngleDeltaDeg(imu.rollDeg, normalUseRollDeg)) <= SMARTCANE_DOWN_NORMAL_POSE_DELTA_DEG &&
        fabsf(imu.totalG - 1.0f) <= SMARTCANE_DOWN_NORMAL_G_DELTA &&
        imu.gyroDps <= SMARTCANE_DOWN_MOTION_GYRO_DPS);
 }
@@ -170,7 +184,7 @@ static bool caneInMotion(const ImuFallState &imu) {
   return imu.gyroDps > SMARTCANE_DOWN_MOTION_GYRO_DPS ||
       fabsf(imu.totalG - 1.0f) > SMARTCANE_DOWN_NORMAL_G_DELTA ||
       fabsf(imu.pitchDeg - normalUsePitchDeg) > SMARTCANE_DOWN_MOTION_POSE_DELTA_DEG ||
-      fabsf(imu.rollDeg - normalUseRollDeg) > SMARTCANE_DOWN_MOTION_POSE_DELTA_DEG;
+      fabsf(wrappedAngleDeltaDeg(imu.rollDeg, normalUseRollDeg)) > SMARTCANE_DOWN_MOTION_POSE_DELTA_DEG;
 }
 
 static bool isInitialBaselineSampleStable(const ImuFallState &imu) {
@@ -205,6 +219,7 @@ static void attachGroundTelemetry(RiskState &risk) {
   risk.groundBaselineCm = baselineReady ? baselineDownCm : -1.0f;
   risk.heightDeltaCm = lastHeightDeltaCm;
   risk.groundState = groundStateName();
+  risk.groundEventSequence = confirmedGroundEventSequence;
   risk.caneMotion = lastCaneMotion;
 }
 
@@ -256,7 +271,9 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
     } else {
       baselineDownCm = (baselineDownCm * baselineFrames + compensatedCm) / (baselineFrames + 1);
       normalUsePitchDeg = (normalUsePitchDeg * baselineFrames + imu.pitchDeg) / (baselineFrames + 1);
-      normalUseRollDeg = (normalUseRollDeg * baselineFrames + imu.rollDeg) / (baselineFrames + 1);
+      normalUseRollDeg = blendWrappedAngleDeg(normalUseRollDeg,
+                                               imu.rollDeg,
+                                               1.0f / (baselineFrames + 1));
       if (baselineFrames < 255) baselineFrames++;
     }
     if (baselineFrames >= SMARTCANE_DOWN_BASELINE_STABLE_FRAMES) {
@@ -368,6 +385,9 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
     // are sufficient, so a real edge confirms in roughly 200 ms.
     if (poseNearNormal && !caneMotion && directionVotes(direction) >= SMARTCANE_STEP_CONFIRM_SAMPLES) {
       confirmedAtMs = now;
+      if (++confirmedGroundEventSequence == 0) {
+        ++confirmedGroundEventSequence;
+      }
       rebaseFrames = 0;
       if (direction < 0) {
         groundState = GROUND_STEP_UP;
@@ -398,7 +418,7 @@ static const char *updateDownRiskState(const DistanceReadings &d, const ImuFallS
     if (poseNearNormal && !caneMotion) {
       baselineDownCm = baselineDownCm * 0.985f + compensatedCm * 0.015f;
       normalUsePitchDeg = normalUsePitchDeg * 0.985f + imu.pitchDeg * 0.015f;
-      normalUseRollDeg = normalUseRollDeg * 0.985f + imu.rollDeg * 0.015f;
+      normalUseRollDeg = blendWrappedAngleDeg(normalUseRollDeg, imu.rollDeg, 0.015f);
     }
     downRiskReason = "normal_ground";
     return "none";
@@ -544,6 +564,8 @@ void printRiskState(const RiskState &risk) {
   Serial.print(risk.groundState);
   Serial.print(F(" delta="));
   Serial.print(risk.heightDeltaCm, 1);
+  Serial.print(F(" ground_event="));
+  Serial.print(risk.groundEventSequence);
   Serial.print(F(" confidence="));
   Serial.print(risk.confidence, 2);
   Serial.print(F(" reason="));

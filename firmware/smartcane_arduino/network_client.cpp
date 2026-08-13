@@ -493,6 +493,7 @@ bool uploadLocalCueEvent(const RiskState& risk,
     cue["cue_id"] = cueId;
     cue["cue_at_ms"] = cueAtMs;
     cue["cue_repeat"] = cueRepeat;
+    cue["ground_event_sequence"] = risk.groundEventSequence;
     cue["buzzer_requested"] = buzzerRequested;
     cue["vibration_requested"] = vibrationRequested;
     cue["firmware_build"] = SMARTCANE_BUILD_TAG;
@@ -566,6 +567,7 @@ bool uploadSensorFrame(const RiskState& risk,
         doc["ground_baseline_cm"] = nullptr;
     }
     doc["height_delta_cm"] = risk.heightDeltaCm;
+    doc["ground_event_sequence"] = risk.groundEventSequence;
     doc["cane_motion"] = risk.caneMotion;
     bool fallAlert = fallDetected ||
         (alertType != nullptr && strcmp(alertType, "fall_detected") == 0);

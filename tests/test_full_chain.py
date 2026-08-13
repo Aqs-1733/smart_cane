@@ -614,6 +614,27 @@ def test_firmware_source_contains_local_step_and_fall_contract():
     assert "reflectFallRecoveryInCurrentRisk" in sketch
 
 
+def test_firmware_ground_pose_treats_roll_wrap_as_one_stable_pose():
+    firmware = (ROOT / "firmware" / "smartcane_arduino" / "risk_logic.cpp").read_text(encoding="utf-8")
+    sketch = (ROOT / "firmware" / "smartcane_arduino" / "smartcane_arduino.ino").read_text(encoding="utf-8")
+
+    # BMI270 may report the same physical roll as +179 and -179 degrees. A
+    # raw subtraction would falsely mark this as a 358-degree cane sweep and
+    # cancel every staircase candidate before its two-frame confirmation.
+    assert "wrappedAngleDeltaDeg" in firmware
+    assert "fmodf(valueDeg - referenceDeg + 180.0f, 360.0f)" in firmware
+    assert "wrappedAngleDeltaDeg(imu.rollDeg, normalUseRollDeg)" in firmware
+    assert "blendWrappedAngleDeg(normalUseRollDeg" in firmware
+
+    # A newly entered fall lock is evaluated again after the four ToF reads,
+    # before normal distance/ground risk classification for that same frame.
+    sensor_loop = sketch[sketch.index("if (now - lastSensorMs >= SMARTCANE_SENSOR_INTERVAL_MS)"):]
+    tof_index = sensor_loop.index("tofRead(distances);")
+    fall_index = sensor_loop.index("serviceFallState(millis());")
+    risk_index = sensor_loop.index("currentRisk = stabilizeRisk(calculateRisk")
+    assert tof_index < fall_index < risk_index
+
+
 def test_medium_and_high_obstacles_can_become_shared_risk_points():
     assert main.map_weight_for_risk("left_obstacle", "low", 25.0) == 8.0
     assert main.map_weight_for_risk("right_obstacle", "medium", 62.0) >= 60.0

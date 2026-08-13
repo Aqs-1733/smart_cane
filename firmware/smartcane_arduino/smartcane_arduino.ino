@@ -131,6 +131,7 @@ static void publishLocalCueEvent(const RiskState &risk,
                                  bool buzzerRequested);
 static void reflectFallLockInCurrentRisk(const ImuFallState &fall,
                                          unsigned long now);
+static void serviceFallState(unsigned long now);
 static RiskState stabilizeRisk(const RiskState &measuredRisk);
 static unsigned long telemetryIntervalForRisk(const RiskState &risk);
 
@@ -261,12 +262,6 @@ static bool sameText(const char *a, const char *b) {
   return strcmp(a, b) == 0;
 }
 
-static bool sameRiskFingerprint(const RiskState &a, const RiskState &b) {
-  return a.level == b.level &&
-         sameText(a.riskType, b.riskType) &&
-         sameText(a.direction, b.direction);
-}
-
 static bool isCloseBuzzRisk(const RiskState &risk) {
   if (strcmp(risk.riskType, "front_obstacle") == 0) {
     return risk.distanceMm > 0 && risk.distanceMm <= SMARTCANE_FRONT_BUZZ_CM * 10;
@@ -302,8 +297,31 @@ static bool isGroundFeedbackRisk(const RiskState &risk) {
          strcmp(risk.riskType, "down_sensor_unavailable") == 0;
 }
 
+static bool sameRiskFingerprint(const RiskState &a, const RiskState &b) {
+  if (a.level != b.level ||
+      !sameText(a.riskType, b.riskType) ||
+      !sameText(a.direction, b.direction)) {
+    return false;
+  }
+  // The held edge is one event; the next confirmed stair has a new sequence
+  // and must be allowed through the cue gate without changing its threshold.
+  if (isGroundFeedbackRisk(a) || isGroundFeedbackRisk(b)) {
+    return a.groundEventSequence == b.groundEventSequence;
+  }
+  return true;
+}
+
 static bool fallLockActive() {
   return imuFallCurrent().fallLock;
+}
+
+static void rearmOrdinaryFeedbackAfterFallLock() {
+  feedbackArmed = true;
+  haveActiveFeedbackRisk = false;
+  riskClearStartedMs = 0;
+  riskFeedbackStartedMs = 0;
+  lastPersistentFeedbackMs = 0;
+  lastFeedbackMs = 0;
 }
 
 static bool updateRiskFeedbackGate(const RiskState &risk, bool &persistent) {
@@ -823,6 +841,33 @@ static void handleFallEvent(const ImuFallState &fall) {
                   "fall_confirmed");
   // The next sensor frame clears fall_pending and carries formal state to the
   // device-state endpoint immediately, rather than waiting for its interval.
+  fallStateTelemetryPending = true;
+}
+
+static void serviceFallState(unsigned long now) {
+  ImuFallState fall;
+  if (imuFallConsumeEvent(fall)) {
+    handleFallEvent(fall);
+  }
+
+  const ImuFallState latestFall = imuFallCurrent();
+  if (latestFall.fallLock == previousFallLockActive) {
+    return;
+  }
+
+  if (latestFall.fallLock) {
+    // Candidate/lying-wait are locally silent but exclusive. The two-second
+    // formal fall pulse is already running when fallActive is true.
+    reflectFallLockInCurrentRisk(latestFall, now);
+    if (!latestFall.fallActive) {
+      vibrationStopAll();
+      buzzerStop();
+    }
+  } else {
+    reflectFallRecoveryInCurrentRisk(latestFall, now);
+    rearmOrdinaryFeedbackAfterFallLock();
+  }
+  previousFallLockActive = latestFall.fallLock;
   fallStateTelemetryPending = true;
 }
 
@@ -1495,37 +1540,18 @@ void loop() {
   touchUpdate(handleTouchEvent);
   handleSerialInput();
   imuFallUpdate();
-  ImuFallState fall;
-  if (imuFallConsumeEvent(fall)) {
-    handleFallEvent(fall);
-  }
-  // Send one immediate *silent* state frame when a candidate lock begins, so
-  // backend/app stop consuming a stale obstacle state.  It carries
-  // fall_pending=true and risk_type=none; it is never a risk event or a voice
-  // trigger.  This happens after the local lock has already been entered.
-  ImuFallState latestFall = imuFallCurrent();
-  if (latestFall.fallLock != previousFallLockActive) {
-    if (latestFall.fallLock) {
-      reflectFallLockInCurrentRisk(latestFall, now);
-      // Candidate lock starts immediately: cancel an old obstacle pulse now,
-      // not one ToF cycle later. A formal fall owns its dedicated two-second
-      // cue, so never cancel that pulse here.
-      if (!latestFall.fallActive) {
-        vibrationStopAll();
-        buzzerStop();
-      }
-    } else {
-      reflectFallRecoveryInCurrentRisk(latestFall, now);
-    }
-    fallStateTelemetryPending = true;
-  }
-  previousFallLockActive = latestFall.fallLock;
+  serviceFallState(now);
   updateGnssLocation();
   networkClientUpdate();
 
   if (now - lastSensorMs >= SMARTCANE_SENSOR_INTERVAL_MS) {
     lastSensorMs = now;
     tofRead(distances);
+    // Four ranging reads take long enough for a rapid tilt to cross the
+    // candidate threshold. Refresh IMU state before classifying this ToF
+    // frame so only a real fall lock can suppress it.
+    imuFallUpdate();
+    serviceFallState(millis());
     if (fallLockActive()) {
       ImuFallState lockedFall = imuFallCurrent();
       reflectFallLockInCurrentRisk(lockedFall, now);
