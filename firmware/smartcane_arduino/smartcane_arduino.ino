@@ -59,9 +59,6 @@ static bool haveActiveFeedbackRisk = false;
 static unsigned long riskClearStartedMs = 0;
 static unsigned long riskFeedbackStartedMs = 0;
 static unsigned long lastPersistentFeedbackMs = 0;
-static bool haveActiveFeedbackLocation = false;
-static long activeFeedbackLatCell = 0;
-static long activeFeedbackLngCell = 0;
 static long lastEventLatCell = 0;
 static long lastEventLngCell = 0;
 static bool haveLastPathCell = false;
@@ -134,7 +131,6 @@ static void publishLocalCueEvent(const RiskState &risk,
                                  bool buzzerRequested);
 static void reflectFallLockInCurrentRisk(const ImuFallState &fall,
                                          unsigned long now);
-static void serviceFallState(unsigned long now);
 static RiskState stabilizeRisk(const RiskState &measuredRisk);
 static unsigned long telemetryIntervalForRisk(const RiskState &risk);
 
@@ -265,6 +261,12 @@ static bool sameText(const char *a, const char *b) {
   return strcmp(a, b) == 0;
 }
 
+static bool sameRiskFingerprint(const RiskState &a, const RiskState &b) {
+  return a.level == b.level &&
+         sameText(a.riskType, b.riskType) &&
+         sameText(a.direction, b.direction);
+}
+
 static bool isCloseBuzzRisk(const RiskState &risk) {
   if (strcmp(risk.riskType, "front_obstacle") == 0) {
     return risk.distanceMm > 0 && risk.distanceMm <= SMARTCANE_FRONT_BUZZ_CM * 10;
@@ -300,37 +302,8 @@ static bool isGroundFeedbackRisk(const RiskState &risk) {
          strcmp(risk.riskType, "down_sensor_unavailable") == 0;
 }
 
-static bool sameRiskFingerprint(const RiskState &a, const RiskState &b) {
-  if (a.level != b.level ||
-      !sameText(a.riskType, b.riskType) ||
-      !sameText(a.direction, b.direction)) {
-    return false;
-  }
-  // A held confirmed edge retains its sequence and stays quiet. A second
-  // physical stair has a new sequence even when it is the same direction at
-  // the same coarse location, so it is not swallowed by the generic 3 s
-  // feedback re-arm gate.
-  if (isGroundFeedbackRisk(a) || isGroundFeedbackRisk(b)) {
-    return a.groundEventSequence == b.groundEventSequence;
-  }
-  return true;
-}
-
 static bool fallLockActive() {
   return imuFallCurrent().fallLock;
-}
-
-static void rearmOrdinaryFeedbackAfterFallLock() {
-  // A candidate can be cancelled after an ordinary cane movement.  Its lock
-  // correctly silences all other feedback while pending, but it must not make
-  // the next confirmed stair look like the same old cue after recovery.
-  feedbackArmed = true;
-  haveActiveFeedbackRisk = false;
-  riskClearStartedMs = 0;
-  riskFeedbackStartedMs = 0;
-  lastPersistentFeedbackMs = 0;
-  haveActiveFeedbackLocation = false;
-  lastFeedbackMs = 0;
 }
 
 static bool updateRiskFeedbackGate(const RiskState &risk, bool &persistent) {
@@ -353,21 +326,12 @@ static bool updateRiskFeedbackGate(const RiskState &risk, bool &persistent) {
   }
 
   riskClearStartedMs = 0;
-  long latCell;
-  long lngCell;
-  currentLocationCell(latCell, lngCell);
-  const bool locationChanged = !haveActiveFeedbackLocation ||
-      latCell != activeFeedbackLatCell || lngCell != activeFeedbackLngCell;
   bool isNewObstacle = feedbackArmed ||
                        !haveActiveFeedbackRisk ||
-                       !sameRiskFingerprint(risk, activeFeedbackRisk) ||
-                       locationChanged;
+                       !sameRiskFingerprint(risk, activeFeedbackRisk);
   if (isNewObstacle) {
     activeFeedbackRisk = risk;
     haveActiveFeedbackRisk = true;
-    activeFeedbackLatCell = latCell;
-    activeFeedbackLngCell = lngCell;
-    haveActiveFeedbackLocation = true;
     feedbackArmed = false;
     riskFeedbackStartedMs = now;
     lastPersistentFeedbackMs = now;
@@ -862,39 +826,6 @@ static void handleFallEvent(const ImuFallState &fall) {
   fallStateTelemetryPending = true;
 }
 
-static void serviceFallState(unsigned long now) {
-  ImuFallState fall;
-  if (imuFallConsumeEvent(fall)) {
-    handleFallEvent(fall);
-  }
-
-  // A candidate must become exclusive as soon as the IMU produces it.  This
-  // helper is called both before and immediately after a ToF sweep: a rapid
-  // tilt can happen during the four ranging reads, so waiting for the next
-  // loop would otherwise allow this sweep to announce a stale obstacle.
-  ImuFallState latestFall = imuFallCurrent();
-  if (latestFall.fallLock != previousFallLockActive) {
-    if (latestFall.fallLock) {
-      reflectFallLockInCurrentRisk(latestFall, now);
-      // Do not let an already queued ordinary obstacle cue reach the phone
-      // after the fall candidate has locked all non-fall feedback.
-      discardQueuedOrdinaryUploads();
-      // Candidate lock starts immediately: cancel an old obstacle pulse now,
-      // not one ToF cycle later. A formal fall owns its dedicated two-second
-      // cue, so never cancel that pulse here.
-      if (!latestFall.fallActive) {
-        vibrationStopAll();
-        buzzerStop();
-      }
-    } else {
-      reflectFallRecoveryInCurrentRisk(latestFall, now);
-      rearmOrdinaryFeedbackAfterFallLock();
-    }
-    fallStateTelemetryPending = true;
-  }
-  previousFallLockActive = latestFall.fallLock;
-}
-
 static void uploadCompanionAlert(const char *riskType, RiskLevel level, const char *reason) {
   unsigned long now = millis();
   if (lastCompanionAlertMs != 0 &&
@@ -1121,12 +1052,7 @@ static void publishRiskEventIfNeeded(const RiskState &risk) {
     // Normal risk upload is intentionally deferred until after runCue() in
     // publishLocalCueEvent(), so one physical cue creates one event and does
     // not add a second synchronous HTTP POST before the next IMU sample.
-    // Deep-risk is an optional cloud lookup with a long response timeout.
-    // Never run it synchronously during normal cane operation: a fall can
-    // begin at any point, and missing its first IMU samples would defeat the
-    // candidate lock. Manual `deep` requests are still supported.
-    if (risk.level == RISK_HIGH && networkMode && networkAvailable() &&
-        !SMARTCANE_IMU_REALTIME_NETWORK_PROTECT) {
+    if (risk.level == RISK_HIGH && networkMode && networkAvailable()) {
       lastDeepRiskMs = millis();
       fetchDeepRisk(risk, distances, location, deepRisk);
     }
@@ -1539,9 +1465,7 @@ void setup() {
   connectWifi();
   if (networkMode && networkAvailable()) {
     uploadLocation(location);
-    if (!SMARTCANE_IMU_REALTIME_NETWORK_PROTECT) {
-      fetchNearbyRisks(location.lat, location.lng, nearby);
-    }
+    fetchNearbyRisks(location.lat, location.lng, nearby);
     currentLocationCell(lastNearbyLatCell, lastNearbyLngCell);
     haveLastNearbyCell = true;
   }
@@ -1571,18 +1495,37 @@ void loop() {
   touchUpdate(handleTouchEvent);
   handleSerialInput();
   imuFallUpdate();
-  serviceFallState(now);
+  ImuFallState fall;
+  if (imuFallConsumeEvent(fall)) {
+    handleFallEvent(fall);
+  }
+  // Send one immediate *silent* state frame when a candidate lock begins, so
+  // backend/app stop consuming a stale obstacle state.  It carries
+  // fall_pending=true and risk_type=none; it is never a risk event or a voice
+  // trigger.  This happens after the local lock has already been entered.
+  ImuFallState latestFall = imuFallCurrent();
+  if (latestFall.fallLock != previousFallLockActive) {
+    if (latestFall.fallLock) {
+      reflectFallLockInCurrentRisk(latestFall, now);
+      // Candidate lock starts immediately: cancel an old obstacle pulse now,
+      // not one ToF cycle later. A formal fall owns its dedicated two-second
+      // cue, so never cancel that pulse here.
+      if (!latestFall.fallActive) {
+        vibrationStopAll();
+        buzzerStop();
+      }
+    } else {
+      reflectFallRecoveryInCurrentRisk(latestFall, now);
+    }
+    fallStateTelemetryPending = true;
+  }
+  previousFallLockActive = latestFall.fallLock;
   updateGnssLocation();
   networkClientUpdate();
 
   if (now - lastSensorMs >= SMARTCANE_SENSOR_INTERVAL_MS) {
     lastSensorMs = now;
     tofRead(distances);
-    // `tofRead()` performs four I2C ranging reads.  Take a fresh BMI270
-    // sample immediately afterwards and apply a newly entered candidate lock
-    // before this ToF frame can be classified or cued as an ordinary risk.
-    imuFallUpdate();
-    serviceFallState(millis());
     if (fallLockActive()) {
       ImuFallState lockedFall = imuFallCurrent();
       reflectFallLockInCurrentRisk(lockedFall, now);
@@ -1646,32 +1589,24 @@ void loop() {
       (fallStateTelemetryPending ||
        now - lastTelemetryUploadMs >= telemetryIntervalForRisk(currentRisk))) {
     lastTelemetryUploadMs = now;
-    bool wasFallStateTelemetryPending = fallStateTelemetryPending;
-    bool queued = uploadSensorFrame(currentRisk,
-                                    distances,
-                                    location,
-                                    imuFallCurrent(),
-                                    nullptr,
-                                    "source=periodic_real_frame",
-                                    nullptr,
-                                    (strcmp(currentRisk.riskType, "fall_detected") == 0 && activeFallEventId.length()) ? activeFallEventId.c_str() : nullptr,
-                                    imuFallCurrent().fallLock && !imuFallCurrent().fallActive,
-                                    // A lying-wait lock is intentionally silent to the
-                                    // backend: only a BMI270-confirmed fall may be
-                                    // represented as fall_detected or carry the event id.
-                                    imuFallCurrent().fallActive && strcmp(currentRisk.riskType, "fall_detected") == 0,
-                                    imuFallCurrent().stage);
-    // A fall transition must never be silently lost because the short
-    // critical queue was momentarily full. Retry it on the next loop without
-    // blocking the IMU task; periodic non-fall telemetry keeps its cadence.
-    if (!wasFallStateTelemetryPending || queued) {
-      fallStateTelemetryPending = false;
-    }
+    uploadSensorFrame(currentRisk,
+                      distances,
+                      location,
+                      imuFallCurrent(),
+                      nullptr,
+                       "source=periodic_real_frame",
+                       nullptr,
+                       (strcmp(currentRisk.riskType, "fall_detected") == 0 && activeFallEventId.length()) ? activeFallEventId.c_str() : nullptr,
+                       imuFallCurrent().fallLock && !imuFallCurrent().fallActive,
+                       // A lying-wait lock is intentionally silent to the
+                       // backend: only a BMI270-confirmed fall may be
+                       // represented as fall_detected or carry the event id.
+                       imuFallCurrent().fallActive && strcmp(currentRisk.riskType, "fall_detected") == 0,
+                       imuFallCurrent().stage);
+    fallStateTelemetryPending = false;
   }
 
-  if (networkMode && networkAvailable() &&
-      !SMARTCANE_IMU_REALTIME_NETWORK_PROTECT &&
-      now - lastNearbyFetchMs >= SMARTCANE_NEARBY_FETCH_INTERVAL_MS) {
+  if (networkMode && networkAvailable() && now - lastNearbyFetchMs >= SMARTCANE_NEARBY_FETCH_INTERVAL_MS) {
     lastNearbyFetchMs = now;
     long latCell;
     long lngCell;
